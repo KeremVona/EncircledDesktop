@@ -13,9 +13,45 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::State;
+use tauri::{State, Emitter, AppHandle};
+use tauri::{tray::TrayIconBuilder, menu::{Menu, MenuItem}};
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_notification::NotificationExt;
+use sysinfo::System;
 use tokio::sync::mpsc;
 use zstd::stream::encode_all;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProcessStatusPayload {
+    is_running: bool,
+    has_debug_flag: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TelemetryPayload {
+    file_name: String,
+    file_hash: String,
+    status: String,
+    verified: bool,
+    has_debug_flag: bool,
+    timestamp: String,
+}
+
+fn check_hoi4_process() -> (bool, bool) {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    let mut is_running = false;
+    let mut has_debug = false;
+    for process in sys.processes_by_exact_name("hoi4.exe") {
+        is_running = true;
+        for arg in process.cmd() {
+            if arg.contains("-debug") || arg.contains("--debug") {
+                has_debug = true;
+            }
+        }
+    }
+    (is_running, has_debug)
+}
 
 #[derive(Default)]
 struct AppState {
@@ -30,6 +66,7 @@ struct WatchConfig {
 
 #[tauri::command]
 async fn start_watching(
+    app: AppHandle,
     config: WatchConfig,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -103,9 +140,10 @@ async fn start_watching(
                         let session_id_clone = session_id.clone();
                         let client_clone = client.clone();
                         let path_clone = path.clone();
+                        let app_clone = app.clone();
                         
                         rt.block_on(async {
-                            if let Err(e) = process_and_upload(&client_clone, &path_clone, &session_id_clone).await {
+                            if let Err(e) = process_and_upload(&app_clone, &client_clone, &path_clone, &session_id_clone).await {
                                 eprintln!("Error processing/uploading: {}", e);
                             }
                         });
@@ -129,7 +167,12 @@ fn get_default_save_path() -> Result<PathBuf, String> {
     }
 }
 
-async fn process_and_upload(client: &Client, file_path: &Path, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_and_upload(
+    app: &AppHandle,
+    client: &Client,
+    file_path: &Path,
+    session_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = fs::File::open(file_path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -139,40 +182,112 @@ async fn process_and_upload(client: &Client, file_path: &Path, session_id: &str)
     hasher.update(&buffer);
     let hash = format!("{:x}", hasher.finalize());
 
-    // Compress with zstd
-    let level = 3; // default level
-    let compressed_data = encode_all(&buffer[..], level)?;
-
-    println!("Original size: {}, Compressed size: {}, Hash: {}", buffer.len(), compressed_data.len(), hash);
-
     let file_name = file_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
         .to_string();
 
-    let form = multipart::Form::new()
-        .text("session_id", session_id.to_string())
-        .text("player_steam_id", "local_player") // Placeholder for Phase 1
-        .text("file_hash", hash)
-        .text("timestamp", timestamp)
-        .part(
-            "savefile",
-            multipart::Part::bytes(compressed_data)
-                .file_name(file_name)
-                .mime_str("application/octet-stream")?,
+    let (_is_running, has_debug_flag) = check_hoi4_process();
+
+    if has_debug_flag {
+        eprintln!("WARNING: HOI4 launched with -debug flag!");
+    }
+
+    // Step 1: Verify Hash & Anti-Cheat telemetry
+    let verify_payload = serde_json::json!({
+        "session_id": session_id,
+        "player_steam_id": "local_player",
+        "file_hash": hash,
+        "file_name": file_name,
+        "timestamp": timestamp,
+        "has_debug_flag": has_debug_flag,
+    });
+
+    println!("Verifying hash with server: {}", hash);
+
+    let verify_res = client
+        .post("http://localhost:3000/api/verify-hash")
+        .json(&verify_payload)
+        .send()
+        .await;
+
+    let mut should_upload = true;
+    let mut verified = false;
+
+    if let Ok(res) = verify_res {
+        if res.status().is_success() {
+            verified = true;
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(so) = json.get("should_upload").and_then(|v| v.as_bool()) {
+                    should_upload = so;
+                }
+            }
+        }
+    } else {
+        println!("Verify endpoint unreachable or returned error, proceeding with upload fallback.");
+    }
+
+    if should_upload {
+        // Compress with zstd
+        let level = 3;
+        let compressed_data = encode_all(&buffer[..], level)?;
+
+        println!(
+            "Original size: {}, Compressed size: {}, Hash: {}",
+            buffer.len(),
+            compressed_data.len(),
+            hash
         );
 
-    // Using localhost:3000 as requested
-    let res = client.post("http://localhost:3000/api/parse-save")
-        .multipart(form)
-        .send()
-        .await?;
+        let form = multipart::Form::new()
+            .text("session_id", session_id.to_string())
+            .text("player_steam_id", "local_player")
+            .text("file_hash", hash.clone())
+            .text("timestamp", timestamp.clone())
+            .text("has_debug_flag", has_debug_flag.to_string())
+            .part(
+                "savefile",
+                multipart::Part::bytes(compressed_data)
+                    .file_name(file_name.clone())
+                    .mime_str("application/octet-stream")?,
+            );
 
-    if res.status().is_success() {
-        println!("Successfully uploaded save file!");
+        let upload_res = client
+            .post("http://localhost:3000/api/parse-save")
+            .multipart(form)
+            .send()
+            .await?;
+
+        if upload_res.status().is_success() {
+            println!("Successfully uploaded save file!");
+            
+            let status_msg = format!("Autosave {} uploaded & verified", file_name);
+            
+            let _ = app.emit(
+                "telemetry-event",
+                TelemetryPayload {
+                    file_name: file_name.clone(),
+                    file_hash: hash.clone(),
+                    status: status_msg.clone(),
+                    verified,
+                    has_debug_flag,
+                    timestamp,
+                },
+            );
+
+            // Native Notification
+            let _ = app
+                .notification()
+                .builder()
+                .title("HOI4 Save Verified")
+                .body(format!("{} (Debug Flag: {})", status_msg, has_debug_flag))
+                .show();
+        } else {
+            println!("Failed to upload save file: {:?}", upload_res.status());
+        }
     } else {
-        println!("Failed to upload save file: {:?}", res.status());
+        println!("Server indicated upload is not required (Hash already verified).");
     }
 
     Ok(())
@@ -184,6 +299,50 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            
+            app.deep_link().on_open_url(move |event| {
+                let urls = event.urls();
+                println!("Received deep link urls: {:?}", urls);
+                if let Some(url) = urls.first() {
+                    let _ = handle.emit("deep-link-received", url.to_string());
+                }
+            });
+            
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&quit_i])?;
+            
+            // Generate a simple tray icon setup
+            let _tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("HOI4 Companion - Idle")
+                .on_menu_event(|app, event| {
+                    if event.id == tauri::menu::MenuId::new("quit") {
+                        app.exit(0);
+                    }
+                })
+                .build(app)?;
+
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    let (is_running, has_debug_flag) = check_hoi4_process();
+                    let _ = app_handle.emit(
+                        "process-status",
+                        ProcessStatusPayload {
+                            is_running,
+                            has_debug_flag,
+                        },
+                    );
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            });
+
+            Ok(())
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![start_watching])
         .run(tauri::generate_context!())

@@ -20,5 +20,10 @@
         "height": 600
       }
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "schemes": ["hoi4hub"]
+    }
   }
 }
