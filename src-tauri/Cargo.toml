@@ -1,0 +1,27 @@
+[package]
+name = "hoi4-save-monitor"
+version = "1.0.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0-rc", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0-rc", features = [] }
+tauri-plugin-shell = "2.0.0-rc"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+notify = "6.1.1"
+notify-debouncer-mini = "0.4.1"
+reqwest = { version = "0.12", features = ["multipart", "stream"] }
+openssl = { version = "0.10", features = ["vendored"] }
+libdbus-sys = { version = "0.2", features = ["vendored"] }
+sha2 = "0.10.8"
+zstd = "0.13.0"
+dirs = "5.0.1"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HOI4 Companion",
+  "version": "1.0.0",
+  "identifier": "com.hoi4.companion",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "HOI4 Companion",
+        "width": 800,
+        "height": 600
+      }
+    ]
+  }
+}
