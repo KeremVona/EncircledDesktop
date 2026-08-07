@@ -21,9 +21,26 @@
       }
     ]
   },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
   "plugins": {
     "deep-link": {
       "schemes": ["hoi4hub"]
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IGF1dG91cGRhdGUgcHVibGljIGtleQ...",
+      "endpoints": [
+        "https://api.yourdomain.com/updates/{{target}}/{{current_version}}"
+      ]
     }
   }
 }

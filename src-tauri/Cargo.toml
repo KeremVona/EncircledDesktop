@@ -25,6 +25,8 @@ tokio = { version = "1", features = ["full"] }
 sysinfo = "0.30"
 tauri-plugin-deep-link = "2.0.0-rc"
 tauri-plugin-notification = "2.0.0-rc"
+tauri-plugin-updater = "2.0.0-rc"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

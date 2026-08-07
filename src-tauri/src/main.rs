@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{State, Emitter, AppHandle};
 use tauri::{tray::TrayIconBuilder, menu::{Menu, MenuItem}};
+use rusqlite::{params, Connection};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_notification::NotificationExt;
 use sysinfo::System;
@@ -51,6 +52,40 @@ fn check_hoi4_process() -> (bool, bool) {
         }
     }
     (is_running, has_debug)
+}
+
+fn init_sqlite_db() -> Result<Connection, rusqlite::Error> {
+    let mut db_path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    db_path.push("hoi4_companion.db");
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS queued_uploads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0
+        )",
+        [],
+    )?;
+    Ok(conn)
+}
+
+fn enqueue_offline_upload(
+    session_id: &str,
+    file_path: &str,
+    file_hash: &str,
+    file_name: &str,
+    timestamp: &str,
+) {
+    if let Ok(conn) = init_sqlite_db() {
+        let _ = conn.execute(
+            "INSERT INTO queued_uploads (session_id, file_path, file_hash, file_name, timestamp, retry_count) VALUES (?, ?, ?, ?, ?, 0)",
+            params![session_id, file_path, file_hash, file_name, timestamp],
+        );
+    }
 }
 
 #[derive(Default)]
@@ -257,34 +292,56 @@ async fn process_and_upload(
             .post("http://localhost:3000/api/parse-save")
             .multipart(form)
             .send()
-            .await?;
+            .await;
 
-        if upload_res.status().is_success() {
-            println!("Successfully uploaded save file!");
-            
-            let status_msg = format!("Autosave {} uploaded & verified", file_name);
-            
-            let _ = app.emit(
-                "telemetry-event",
-                TelemetryPayload {
-                    file_name: file_name.clone(),
-                    file_hash: hash.clone(),
-                    status: status_msg.clone(),
-                    verified,
-                    has_debug_flag,
-                    timestamp,
-                },
-            );
+        match upload_res {
+            Ok(res) if res.status().is_success() => {
+                println!("Successfully uploaded save file!");
+                
+                let status_msg = format!("Autosave {} uploaded & verified", file_name);
+                
+                let _ = app.emit(
+                    "telemetry-event",
+                    TelemetryPayload {
+                        file_name: file_name.clone(),
+                        file_hash: hash.clone(),
+                        status: status_msg.clone(),
+                        verified,
+                        has_debug_flag,
+                        timestamp,
+                    },
+                );
 
-            // Native Notification
-            let _ = app
-                .notification()
-                .builder()
-                .title("HOI4 Save Verified")
-                .body(format!("{} (Debug Flag: {})", status_msg, has_debug_flag))
-                .show();
-        } else {
-            println!("Failed to upload save file: {:?}", upload_res.status());
+                // Native Notification
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("HOI4 Save Verified")
+                    .body(format!("{} (Debug Flag: {})", status_msg, has_debug_flag))
+                    .show();
+            }
+            _ => {
+                println!("Failed/offline upload attempt. Adding to SQLite queue.");
+                enqueue_offline_upload(
+                    session_id,
+                    &file_path.to_string_lossy(),
+                    &hash,
+                    &file_name,
+                    &timestamp,
+                );
+
+                let _ = app.emit(
+                    "telemetry-event",
+                    TelemetryPayload {
+                        file_name: file_name.clone(),
+                        file_hash: hash.clone(),
+                        status: "Offline - Queued in SQLite".into(),
+                        verified: false,
+                        has_debug_flag,
+                        timestamp,
+                    },
+                );
+            }
         }
     } else {
         println!("Server indicated upload is not required (Hash already verified).");
@@ -301,8 +358,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
+            let _ = init_sqlite_db();
             
             app.deep_link().on_open_url(move |event| {
                 let urls = event.urls();
@@ -338,6 +397,81 @@ fn main() {
                         },
                     );
                     std::thread::sleep(Duration::from_secs(5));
+                }
+            });
+
+            // SQLite Offline Retry Loop Thread
+            let retry_client = Client::new();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                loop {
+                    std::thread::sleep(Duration::from_secs(30));
+                    if let Ok(conn) = init_sqlite_db() {
+                        let mut stmt = match conn.prepare(
+                            "SELECT id, session_id, file_path, file_hash, file_name, timestamp, retry_count FROM queued_uploads WHERE retry_count < 10"
+                        ) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+
+                        let rows = stmt.query_map([], |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                                row.get::<_, i32>(6)?,
+                            ))
+                        });
+
+                        if let Ok(rows) = rows {
+                            for item in rows.flatten() {
+                                let (id, session_id, file_path_str, file_hash, file_name, timestamp, retry_count) = item;
+                                let path = PathBuf::from(&file_path_str);
+                                if !path.exists() {
+                                    let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
+                                    continue;
+                                }
+
+                                if let Ok(buffer) = fs::read(&path) {
+                                    if let Ok(compressed_data) = encode_all(&buffer[..], 3) {
+                                        let form = multipart::Form::new()
+                                            .text("session_id", session_id)
+                                            .text("player_steam_id", "local_player")
+                                            .text("file_hash", file_hash)
+                                            .text("timestamp", timestamp)
+                                            .part(
+                                                "savefile",
+                                                multipart::Part::bytes(compressed_data)
+                                                    .file_name(file_name)
+                                                    .mime_str("application/octet-stream").unwrap(),
+                                            );
+
+                                        let client_ref = retry_client.clone();
+                                        let res = rt.block_on(async {
+                                            client_ref.post("http://localhost:3000/api/parse-save")
+                                                .multipart(form)
+                                                .send()
+                                                .await
+                                        });
+
+                                        if let Ok(res) = res {
+                                            if res.status().is_success() {
+                                                println!("Retry upload succeeded for queued item ID {}", id);
+                                                let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
+                                            } else {
+                                                let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
+                                            }
+                                        } else {
+                                            let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             });
 
