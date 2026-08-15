@@ -79,8 +79,8 @@ function App() {
 
   return (
     <div className="container">
-      <h1>HOI4 Companion App</h1>
-      <p>Phase 1 - Minimal UI</p>
+      <h1>Encircled Desktop</h1>
+      <p>Match Verification & Save Telemetry</p>
 
       <div className="form-group">
         <label>Session ID:</label>
