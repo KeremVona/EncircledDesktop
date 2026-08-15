@@ -34,7 +34,7 @@
   },
   "plugins": {
     "deep-link": {
-      "schemes": ["encircled"]
+      "schemes": ["encircled", "encircled-desktop"]
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IGF1dG91cGRhdGUgcHVibGljIGtleQ...",

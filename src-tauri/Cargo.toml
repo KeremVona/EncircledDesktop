@@ -16,8 +16,6 @@ serde_json = "1.0"
 notify = "6.1.1"
 notify-debouncer-mini = "0.4.1"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
-openssl = { version = "0.10", features = ["vendored"] }
-libdbus-sys = { version = "0.2", features = ["vendored"] }
 sha2 = "0.10.8"
 zstd = "0.13.0"
 dirs = "5.0.1"

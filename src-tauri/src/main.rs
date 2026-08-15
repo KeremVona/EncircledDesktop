@@ -43,11 +43,14 @@ fn check_hoi4_process() -> (bool, bool) {
     sys.refresh_all();
     let mut is_running = false;
     let mut has_debug = false;
-    for process in sys.processes_by_exact_name("hoi4.exe") {
-        is_running = true;
-        for arg in process.cmd() {
-            if arg.contains("-debug") || arg.contains("--debug") {
-                has_debug = true;
+    for process in sys.processes().values() {
+        let name = process.name();
+        if name.eq_ignore_ascii_case("hoi4.exe") || name.eq_ignore_ascii_case("hoi4") {
+            is_running = true;
+            for arg in process.cmd() {
+                if arg.contains("-debug") || arg.contains("--debug") {
+                    has_debug = true;
+                }
             }
         }
     }
@@ -56,7 +59,7 @@ fn check_hoi4_process() -> (bool, bool) {
 
 fn init_sqlite_db() -> Result<Connection, rusqlite::Error> {
     let mut db_path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    db_path.push("hoi4_companion.db");
+    db_path.push("encircled_desktop.db");
     let conn = Connection::open(db_path)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS queued_uploads (
@@ -93,16 +96,11 @@ struct AppState {
     watcher_tx: Mutex<Option<mpsc::Sender<()>>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct WatchConfig {
-    session_id: String,
-    path: Option<String>,
-}
-
 #[tauri::command]
 async fn start_watching(
     app: AppHandle,
-    config: WatchConfig,
+    session_id: String,
+    path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     // If a watcher is already running, we stop it by dropping its channel.
@@ -113,7 +111,7 @@ async fn start_watching(
         }
     }
 
-    let watch_path = if let Some(p) = config.path.clone() {
+    let watch_path = if let Some(p) = path.clone() {
         if p.is_empty() {
             get_default_save_path()?
         } else {
@@ -124,7 +122,9 @@ async fn start_watching(
     };
 
     if !watch_path.exists() {
-        return Err(format!("Path does not exist: {:?}", watch_path));
+        if let Err(e) = fs::create_dir_all(&watch_path) {
+            return Err(format!("Path does not exist and could not be created: {:?} ({})", watch_path, e));
+        }
     }
 
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
@@ -134,7 +134,7 @@ async fn start_watching(
         *tx_guard = Some(stop_tx);
     }
 
-    let session_id = config.session_id.clone();
+    let session_id = session_id.clone();
     let watch_path_for_thread = watch_path.clone();
     
     std::thread::spawn(move || {
@@ -351,8 +351,11 @@ async fn process_and_upload(
 }
 
 fn main() {
-    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -377,7 +380,7 @@ fn main() {
             // Generate a simple tray icon setup
             let _tray = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("HOI4 Companion - Idle")
+                .tooltip("Encircled Desktop")
                 .on_menu_event(|app, event| {
                     if event.id == tauri::menu::MenuId::new("quit") {
                         app.exit(0);
@@ -428,7 +431,7 @@ fn main() {
 
                         if let Ok(rows) = rows {
                             for item in rows.flatten() {
-                                let (id, session_id, file_path_str, file_hash, file_name, timestamp, retry_count) = item;
+                                let (id, session_id, file_path_str, file_hash, file_name, timestamp, _retry_count) = item;
                                 let path = PathBuf::from(&file_path_str);
                                 if !path.exists() {
                                     let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
