@@ -20,7 +20,6 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_notification::NotificationExt;
 use sysinfo::System;
 use tokio::sync::mpsc;
-use zstd::stream::encode_all;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ProcessStatusPayload {
@@ -44,17 +43,28 @@ fn check_hoi4_process() -> (bool, bool) {
     let mut is_running = false;
     let mut has_debug = false;
     for process in sys.processes().values() {
-        let name = process.name();
-        if name.eq_ignore_ascii_case("hoi4.exe") || name.eq_ignore_ascii_case("hoi4") {
+        let name = process.name().to_lowercase();
+        let exe = process.exe().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if name == "hoi4.exe" || name == "hoi4" || name.contains("hoi4") || exe.contains("hoi4.exe") || exe.contains("hoi4") {
             is_running = true;
             for arg in process.cmd() {
-                if arg.contains("-debug") || arg.contains("--debug") {
+                let arg_str = arg.to_lowercase();
+                if arg_str.contains("-debug") || arg_str.contains("--debug") {
                     has_debug = true;
                 }
             }
         }
     }
     (is_running, has_debug)
+}
+
+#[tauri::command]
+fn get_process_status() -> ProcessStatusPayload {
+    let (is_running, has_debug_flag) = check_hoi4_process();
+    ProcessStatusPayload {
+        is_running,
+        has_debug_flag,
+    }
 }
 
 fn init_sqlite_db() -> Result<Connection, rusqlite::Error> {
@@ -123,7 +133,7 @@ async fn start_watching(
 
     if !watch_path.exists() {
         if let Err(e) = fs::create_dir_all(&watch_path) {
-            return Err(format!("Path does not exist and could not be created: {:?} ({})", watch_path, e));
+            return Err(format!("Path does not exist and could not be made: {:?} ({})", watch_path, e));
         }
     }
 
@@ -137,12 +147,35 @@ async fn start_watching(
     let session_id = session_id.clone();
     let watch_path_for_thread = watch_path.clone();
     
+    // Notify server of active watcher
+    let connect_client = Client::new();
+    let connect_session_id = session_id.clone();
+    let connect_path_str = watch_path.to_string_lossy().to_string();
+    tokio::spawn(async move {
+        let _ = connect_client
+            .post(format!("http://localhost:5292/api/lobbies/{}/desktop/connect", connect_session_id))
+            .send()
+            .await;
+
+        let watcher_payload = serde_json::json!({
+            "isActive": true,
+            "saveFolderPath": connect_path_str,
+            "isValidated": true
+        });
+
+        let _ = connect_client
+            .post(format!("http://localhost:5292/api/lobbies/{}/desktop/watcher-status", connect_session_id))
+            .json(&watcher_payload)
+            .send()
+            .await;
+    });
+
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debouncer = match new_debouncer(Duration::from_secs(3), tx) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Failed to create debouncer: {}", e);
+                eprintln!("Failed to make debouncer: {}", e);
                 return;
             }
         };
@@ -169,7 +202,14 @@ async fn start_watching(
                 for event in events {
                     // We only care about file modifications/creations that are .hoi4 files
                     let path = event.path;
-                    if path.extension().and_then(|e| e.to_str()) == Some("hoi4") {
+                    let file_name_str = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    if path.extension().and_then(|e| e.to_str()) == Some("hoi4") 
+                        && !file_name_str.contains("temp") 
+                        && !file_name_str.ends_with(".tmp") 
+                    {
+                        if !path.exists() {
+                            continue;
+                        }
                         println!("Detected save file change: {:?}", path);
                         
                         let session_id_clone = session_id.clone();
@@ -242,7 +282,7 @@ async fn process_and_upload(
     println!("Verifying hash with server: {}", hash);
 
     let verify_res = client
-        .post("http://localhost:3000/api/verify-hash")
+        .post("http://localhost:5292/api/verify-hash")
         .json(&verify_payload)
         .send()
         .await;
@@ -264,14 +304,9 @@ async fn process_and_upload(
     }
 
     if should_upload {
-        // Compress with zstd
-        let level = 3;
-        let compressed_data = encode_all(&buffer[..], level)?;
-
         println!(
-            "Original size: {}, Compressed size: {}, Hash: {}",
+            "Save file size: {} bytes, Hash: {}",
             buffer.len(),
-            compressed_data.len(),
             hash
         );
 
@@ -283,13 +318,13 @@ async fn process_and_upload(
             .text("has_debug_flag", has_debug_flag.to_string())
             .part(
                 "savefile",
-                multipart::Part::bytes(compressed_data)
+                multipart::Part::bytes(buffer)
                     .file_name(file_name.clone())
                     .mime_str("application/octet-stream")?,
             );
 
         let upload_res = client
-            .post("http://localhost:3000/api/parse-save")
+            .post("http://localhost:5292/api/parse-save")
             .multipart(form)
             .send()
             .await;
@@ -316,13 +351,39 @@ async fn process_and_upload(
                 let _ = app
                     .notification()
                     .builder()
-                    .title("HOI4 Save Verified")
+                    .title("HOI4 Save Telemetry")
                     .body(format!("{} (Debug Flag: {})", status_msg, has_debug_flag))
                     .show();
             }
-            _ => {
+            Ok(res) => {
+                let status = res.status();
+                let err_text = res.text().await.unwrap_or_default();
+                eprintln!("Upload failed with HTTP {}: {}", status, err_text);
                 println!("Failed/offline upload attempt. Adding to SQLite queue.");
-                enqueue_offline_upload(
+                let _ = enqueue_offline_upload(
+                    session_id,
+                    &file_path.to_string_lossy(),
+                    &hash,
+                    &file_name,
+                    &timestamp,
+                );
+
+                let _ = app.emit(
+                    "telemetry-event",
+                    TelemetryPayload {
+                        file_name: file_name.clone(),
+                        file_hash: hash.clone(),
+                        status: "Offline - Queued in SQLite".into(),
+                        verified: false,
+                        has_debug_flag,
+                        timestamp,
+                    },
+                );
+            }
+            Err(e) => {
+                eprintln!("Upload network error: {}", e);
+                println!("Failed/offline upload attempt. Adding to SQLite queue.");
+                let _ = enqueue_offline_upload(
                     session_id,
                     &file_path.to_string_lossy(),
                     &hash,
@@ -365,6 +426,11 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let _ = init_sqlite_db();
+            
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                let _ = app.deep_link().register_all();
+            }
             
             app.deep_link().on_open_url(move |event| {
                 let urls = event.urls();
@@ -439,37 +505,35 @@ fn main() {
                                 }
 
                                 if let Ok(buffer) = fs::read(&path) {
-                                    if let Ok(compressed_data) = encode_all(&buffer[..], 3) {
-                                        let form = multipart::Form::new()
-                                            .text("session_id", session_id)
-                                            .text("player_steam_id", "local_player")
-                                            .text("file_hash", file_hash)
-                                            .text("timestamp", timestamp)
-                                            .part(
-                                                "savefile",
-                                                multipart::Part::bytes(compressed_data)
-                                                    .file_name(file_name)
-                                                    .mime_str("application/octet-stream").unwrap(),
-                                            );
+                                    let form = multipart::Form::new()
+                                        .text("session_id", session_id)
+                                        .text("player_steam_id", "local_player")
+                                        .text("file_hash", file_hash)
+                                        .text("timestamp", timestamp)
+                                        .part(
+                                            "savefile",
+                                            multipart::Part::bytes(buffer)
+                                                .file_name(file_name)
+                                                .mime_str("application/octet-stream").unwrap(),
+                                        );
 
-                                        let client_ref = retry_client.clone();
-                                        let res = rt.block_on(async {
-                                            client_ref.post("http://localhost:3000/api/parse-save")
-                                                .multipart(form)
-                                                .send()
-                                                .await
-                                        });
+                                    let client_ref = retry_client.clone();
+                                    let res = rt.block_on(async {
+                                        client_ref.post("http://localhost:5292/api/parse-save")
+                                            .multipart(form)
+                                            .send()
+                                            .await
+                                    });
 
-                                        if let Ok(res) = res {
-                                            if res.status().is_success() {
-                                                println!("Retry upload succeeded for queued item ID {}", id);
-                                                let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
-                                            } else {
-                                                let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
-                                            }
+                                    if let Ok(res) = res {
+                                        if res.status().is_success() {
+                                            println!("Retry upload succeeded for queued item ID {}", id);
+                                            let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
                                         } else {
                                             let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
                                         }
+                                    } else {
+                                        let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
                                     }
                                 }
                             }
@@ -481,7 +545,7 @@ fn main() {
             Ok(())
         })
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start_watching])
+        .invoke_handler(tauri::generate_handler![start_watching, get_process_status])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
