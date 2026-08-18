@@ -31,6 +31,16 @@ function App() {
     let unlistenTelemetry: () => void;
 
     async function setupListeners() {
+      try {
+        const initialStatus = await invoke<ProcessStatusPayload>("get_process_status");
+        if (initialStatus) {
+          setIsHoi4Running(initialStatus.is_running);
+          setHasDebugFlag(initialStatus.has_debug_flag);
+        }
+      } catch (err) {
+        console.error("Failed to get initial process status:", err);
+      }
+
       unlistenProcess = await listen<ProcessStatusPayload>("process-status", (event) => {
         setIsHoi4Running(event.payload.is_running);
         setHasDebugFlag(event.payload.has_debug_flag);

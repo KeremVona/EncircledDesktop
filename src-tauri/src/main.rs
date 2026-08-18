@@ -410,6 +410,24 @@ async fn process_and_upload(
 
     Ok(())
 }
+=======
+mod db;
+mod models;
+mod process;
+mod uploader;
+mod watcher;
+
+use db::init_sqlite_db;
+use models::{AppState, ProcessStatusPayload};
+use process::check_hoi4_process;
+use std::time::Duration;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::Emitter;
+use tauri_plugin_deep_link::DeepLinkExt;
+use uploader::spawn_offline_retry_worker;
+use watcher::{get_process_status, start_watching};
+>>>>>>> c04b37b (upload)
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -426,12 +444,20 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let _ = init_sqlite_db();
+<<<<<<< HEAD
             
+=======
+
+>>>>>>> c04b37b (upload)
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 let _ = app.deep_link().register_all();
             }
+<<<<<<< HEAD
             
+=======
+
+>>>>>>> c04b37b (upload)
             app.deep_link().on_open_url(move |event| {
                 let urls = event.urls();
                 println!("Received deep link urls: {:?}", urls);
@@ -439,11 +465,19 @@ fn main() {
                     let _ = handle.emit("deep-link-received", url.to_string());
                 }
             });
+<<<<<<< HEAD
             
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit_i])?;
             
             // Generate a simple tray icon setup
+=======
+
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&quit_i])?;
+
+            // Setup system tray icon & menu
+>>>>>>> c04b37b (upload)
             let _tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("Encircled Desktop")
@@ -454,6 +488,10 @@ fn main() {
                 })
                 .build(app)?;
 
+<<<<<<< HEAD
+=======
+            // Background HOI4 Process Polling Thread (emits process-status every 5s)
+>>>>>>> c04b37b (upload)
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 loop {
@@ -469,6 +507,7 @@ fn main() {
                 }
             });
 
+<<<<<<< HEAD
             // SQLite Offline Retry Loop Thread
             let retry_client = Client::new();
             std::thread::spawn(move || {
@@ -541,6 +580,10 @@ fn main() {
                     }
                 }
             });
+=======
+            // SQLite Offline Retry Worker Thread (retries failed uploads every 30s)
+            spawn_offline_retry_worker();
+>>>>>>> c04b37b (upload)
 
             Ok(())
         })
