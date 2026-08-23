@@ -18,7 +18,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::Emitter;
 use tauri_plugin_deep_link::DeepLinkExt;
 use uploader::spawn_offline_retry_worker;
-use watcher::{get_process_status, start_watching};
+use watcher::{get_default_save_path_cmd, get_process_status, select_save_folder, start_watching};
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -49,6 +49,16 @@ fn main() {
                 }
             });
 
+            let handle_for_args = app.handle().clone();
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(arg) = args.iter().find(|a| a.starts_with("encircled://") || a.starts_with("encircled-desktop://")) {
+                let deep_url = arg.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(800));
+                    let _ = handle_for_args.emit("deep-link-received", deep_url);
+                });
+            }
+
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit_i])?;
 
@@ -75,7 +85,7 @@ fn main() {
                             has_debug_flag,
                         },
                     );
-                    std::thread::sleep(Duration::from_secs(5));
+                    std::thread::sleep(Duration::from_secs(2));
                 }
             });
 
@@ -85,7 +95,12 @@ fn main() {
             Ok(())
         })
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start_watching, get_process_status])
+        .invoke_handler(tauri::generate_handler![
+            start_watching,
+            get_process_status,
+            get_default_save_path_cmd,
+            select_save_folder
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

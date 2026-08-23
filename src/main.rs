@@ -123,7 +123,7 @@ async fn start_watching(
 
     if !watch_path.exists() {
         if let Err(e) = fs::create_dir_all(&watch_path) {
-            return Err(format!("Path does not exist and could not be created: {:?} ({})", watch_path, e));
+            return Err(format!("Path does not exist and could not be made: {:?} ({})", watch_path, e));
         }
     }
 
@@ -142,7 +142,7 @@ async fn start_watching(
         let mut debouncer = match new_debouncer(Duration::from_secs(3), tx) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Failed to create debouncer: {}", e);
+                eprintln!("Failed to make debouncer: {}", e);
                 return;
             }
         };
@@ -167,7 +167,7 @@ async fn start_watching(
             // Check for file events
             if let Ok(Ok(events)) = rx.recv_timeout(Duration::from_millis(500)) {
                 for event in events {
-                    // We only care about file modifications/creations that are .hoi4 files
+                    // We only care about file changes/makings that are .hoi4 files
                     let path = event.path;
                     if path.extension().and_then(|e| e.to_str()) == Some("hoi4") {
                         println!("Detected save file change: {:?}", path);

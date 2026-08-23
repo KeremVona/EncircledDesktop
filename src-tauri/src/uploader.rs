@@ -1,6 +1,7 @@
 use crate::db::{enqueue_offline_upload, init_sqlite_db};
 use crate::models::TelemetryPayload;
 use crate::process::check_hoi4_process;
+use crate::watcher::get_api_base_url;
 use reqwest::multipart;
 use reqwest::Client;
 use rusqlite::params;
@@ -11,8 +12,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
-
-const API_BASE_URL: &str = "http://localhost:5292";
 
 pub async fn process_and_upload(
     app: &AppHandle,
@@ -55,8 +54,9 @@ pub async fn process_and_upload(
 
     println!("Verifying save hash preflight with server: {}", hash);
 
+    let base_url = get_api_base_url();
     let verify_res = client
-        .post(format!("{}/api/verify-hash", API_BASE_URL))
+        .post(format!("{}/api/verify-hash", base_url))
         .json(&verify_payload)
         .send()
         .await;
@@ -118,7 +118,7 @@ pub async fn process_and_upload(
             );
 
         let upload_res = client
-            .post(format!("{}/api/parse-save", API_BASE_URL))
+            .post(format!("{}/api/parse-save", base_url))
             .multipart(form)
             .send()
             .await;
@@ -270,8 +270,9 @@ pub fn spawn_offline_retry_worker() {
                                 );
 
                             let client_ref = retry_client.clone();
+                            let retry_base_url = get_api_base_url();
                             let res = rt.block_on(async {
-                                client_ref.post(format!("{}/api/parse-save", API_BASE_URL))
+                                client_ref.post(format!("{}/api/parse-save", retry_base_url))
                                     .multipart(form)
                                     .send()
                                     .await
