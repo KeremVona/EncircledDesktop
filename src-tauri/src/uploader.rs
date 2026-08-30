@@ -1,10 +1,9 @@
-use crate::db::{enqueue_offline_upload, init_sqlite_db};
+use crate::db::enqueue_offline_upload;
 use crate::models::TelemetryPayload;
 use crate::process::check_hoi4_process;
 use crate::watcher::get_api_base_url;
 use reqwest::multipart;
 use reqwest::Client;
-use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -12,6 +11,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
+use tokio_util::io::ReaderStream;
+
+pub const MAX_SAVE_FILE_SIZE: u64 = 250 * 1024 * 1024; // 250 MB cap
+
+/// P-2: Compute SHA-256 hash using a small 64 KB streaming buffer without reading entire file into RAM.
+pub fn compute_file_sha256(file_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let file = fs::File::open(file_path)?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 pub async fn process_and_upload(
     app: &AppHandle,
@@ -20,15 +38,6 @@ pub async fn process_and_upload(
     session_id: &str,
     sequence_index: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = fs::File::open(file_path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-
-    // Compute SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(&buffer);
-    let hash = format!("{:x}", hasher.finalize());
-
     let file_name = file_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -37,11 +46,36 @@ pub async fn process_and_upload(
 
     let (_is_running, has_debug_flag) = check_hoi4_process();
 
+    // Check file metadata and enforce maximum upload size cap
+    let metadata = fs::metadata(file_path)?;
+    let file_len = metadata.len();
+    if file_len > MAX_SAVE_FILE_SIZE {
+        eprintln!(
+            "Save file {} rejected: size {} bytes exceeds 250 MB cap",
+            file_name, file_len
+        );
+        let _ = app.emit(
+            "telemetry-event",
+            TelemetryPayload {
+                file_name: file_name.clone(),
+                file_hash: "OVERSIZED".into(),
+                status: format!("REJECTED: File size ({:.1} MB) exceeds 250 MB limit", (file_len as f64) / (1024.0 * 1024.0)),
+                verified: false,
+                has_debug_flag,
+                timestamp,
+            },
+        );
+        return Err("File size exceeds 250 MB limit".into());
+    }
+
+    // P-2: Compute SHA-256 via 64KB streaming buffer without loading 50-200MB into memory
+    let hash = compute_file_sha256(file_path)?;
+
     if has_debug_flag {
         eprintln!("WARNING: HOI4 launched with -debug flag!");
     }
 
-    // Step 1: Verify Hash & Anti-Cheat telemetry
+    // Step 1: Verify Hash & Anti-Cheat telemetry (Preflight)
     let verify_payload = serde_json::json!({
         "session_id": session_id,
         "player_steam_id": "local_player",
@@ -98,10 +132,18 @@ pub async fn process_and_upload(
     if should_upload {
         println!(
             "Save file size: {} bytes, Hash: {}, Seq: {}",
-            buffer.len(),
+            file_len,
             hash,
             sequence_index
         );
+
+        // P-2 & P-3: Stream file directly from disk into HTTP multipart body without buffering 200MB in RAM
+        let async_file = tokio::fs::File::open(file_path).await?;
+        let stream = ReaderStream::new(async_file);
+        let body = reqwest::Body::wrap_stream(stream);
+        let file_part = multipart::Part::stream_with_length(body, file_len)
+            .file_name(file_name.clone())
+            .mime_str("application/octet-stream")?;
 
         let form = multipart::Form::new()
             .text("session_id", session_id.to_string())
@@ -110,12 +152,7 @@ pub async fn process_and_upload(
             .text("sequence_index", sequence_index.to_string())
             .text("timestamp", timestamp.clone())
             .text("has_debug_flag", has_debug_flag.to_string())
-            .part(
-                "savefile",
-                multipart::Part::bytes(buffer)
-                    .file_name(file_name.clone())
-                    .mime_str("application/octet-stream")?,
-            );
+            .part("savefile", file_part);
 
         let upload_res = client
             .post(format!("{}/api/parse-save", base_url))
@@ -221,72 +258,56 @@ pub async fn process_and_upload(
     Ok(())
 }
 
-pub fn spawn_offline_retry_worker() {
-    let retry_client = Client::new();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+pub fn spawn_offline_retry_worker(client: Client) {
+    tauri::async_runtime::spawn(async move {
         loop {
-            std::thread::sleep(Duration::from_secs(30));
-            if let Ok(conn) = init_sqlite_db() {
-                let mut stmt = match conn.prepare(
-                    "SELECT id, session_id, file_path, file_hash, file_name, timestamp, retry_count FROM queued_uploads WHERE retry_count < 10"
-                ) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+            tokio::time::sleep(Duration::from_secs(30)).await;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i32>(6)?,
-                    ))
-                });
+            let pending = crate::db::get_pending_queued_uploads();
+            for item in pending {
+                let path = PathBuf::from(&item.file_path);
+                if !path.exists() {
+                    crate::db::delete_queued_upload(item.id);
+                    continue;
+                }
 
-                if let Ok(rows) = rows {
-                    for item in rows.flatten() {
-                        let (id, session_id, file_path_str, file_hash, file_name, timestamp, _retry_count) = item;
-                        let path = PathBuf::from(&file_path_str);
-                        if !path.exists() {
-                            let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
-                            continue;
-                        }
+                if let Ok(meta) = fs::metadata(&path) {
+                    let file_len = meta.len();
+                    if file_len > MAX_SAVE_FILE_SIZE {
+                        eprintln!("Queued retry item ID {} exceeds max file size limit, pruning", item.id);
+                        crate::db::delete_queued_upload(item.id);
+                        continue;
+                    }
 
-                        if let Ok(buffer) = fs::read(&path) {
+                    if let Ok(async_file) = tokio::fs::File::open(&path).await {
+                        let stream = ReaderStream::new(async_file);
+                        let body = reqwest::Body::wrap_stream(stream);
+                        if let Ok(file_part) = multipart::Part::stream_with_length(body, file_len)
+                            .file_name(item.file_name)
+                            .mime_str("application/octet-stream")
+                        {
                             let form = multipart::Form::new()
-                                .text("session_id", session_id)
+                                .text("session_id", item.session_id)
                                 .text("player_steam_id", "local_player")
-                                .text("file_hash", file_hash)
-                                .text("timestamp", timestamp)
-                                .part(
-                                    "savefile",
-                                    multipart::Part::bytes(buffer)
-                                        .file_name(file_name)
-                                        .mime_str("application/octet-stream").unwrap(),
-                                );
+                                .text("file_hash", item.file_hash)
+                                .text("timestamp", item.timestamp)
+                                .part("savefile", file_part);
 
-                            let client_ref = retry_client.clone();
                             let retry_base_url = get_api_base_url();
-                            let res = rt.block_on(async {
-                                client_ref.post(format!("{}/api/parse-save", retry_base_url))
-                                    .multipart(form)
-                                    .send()
-                                    .await
-                            });
+                            let res = client
+                                .post(format!("{}/api/parse-save", retry_base_url))
+                                .multipart(form)
+                                .send()
+                                .await;
 
-                            if let Ok(res) = res {
-                                if res.status().is_success() {
-                                    println!("Retry upload succeeded for queued item ID {}", id);
-                                    let _ = conn.execute("DELETE FROM queued_uploads WHERE id = ?", params![id]);
-                                } else {
-                                    let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
+                            match res {
+                                Ok(r) if r.status().is_success() => {
+                                    println!("Retry upload succeeded for queued item ID {}", item.id);
+                                    crate::db::delete_queued_upload(item.id);
                                 }
-                            } else {
-                                let _ = conn.execute("UPDATE queued_uploads SET retry_count = retry_count + 1 WHERE id = ?", params![id]);
+                                _ => {
+                                    crate::db::increment_queued_upload_retry(item.id);
+                                }
                             }
                         }
                     }

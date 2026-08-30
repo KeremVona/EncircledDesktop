@@ -38,12 +38,14 @@ A lightweight, high-performance **Tauri v2** desktop application designed for **
 ### Development Setup
 
 1. **Clone the repository**:
+
    ```bash
    git clone https://github.com/KeremVona/EncircledDesktop.git
    cd EncircledDesktop
    ```
 
 2. **Install Frontend Dependencies**:
+
    ```bash
    npm install
    ```
@@ -64,3 +66,11 @@ npm run tauri build
 ```
 
 The output installers will be generated under `src-tauri/target/release/bundle/`.
+
+## Privacy and Data Handling
+
+Encircled monitors your local Hearts of Iron IV save game directory solely to parse and upload match data to your account:
+
+- **Monitored Path:** `%USERPROFILE%\Documents\Paradox Interactive\Hearts of Iron IV\save games` or the path under OneDrive
+- **Data Collected:** Parsed game statistics, country tags, player identifiers, match timestamps and more, please refer to the [Privacy Policy](https://github.com/KeremVona/EncircledDesktop/blob/main/PrivacyPolicy.md) and [Terms of Service](https://github.com/KeremVona/EncircledDesktop/blob/main/TermsOfService.md).
+- **Controls:** File watching can be stopped in the app or by closing the app.

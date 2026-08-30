@@ -14,11 +14,16 @@ use models::{AppState, ProcessStatusPayload};
 use process::check_hoi4_process;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::Emitter;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uploader::spawn_offline_retry_worker;
-use watcher::{get_default_save_path_cmd, get_process_status, select_save_folder, start_watching};
+use watcher::{
+    check_for_updates_cmd, clear_offline_queue, get_app_version, get_autostart_status,
+    get_default_save_path_cmd, get_minimize_to_tray_status, get_offline_queue,
+    get_process_status, retry_offline_queue_now, select_save_folder, set_autostart,
+    set_minimize_to_tray, start_watching, stop_watching, update_tray_tooltip,
+};
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -59,47 +64,105 @@ fn main() {
                 });
             }
 
+            let toggle_i = MenuItem::with_id(app, "toggle", "Show / Hide Encircled", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&quit_i])?;
+            let menu = Menu::with_items(app, &[&toggle_i, &quit_i])?;
 
             // Setup system tray icon & menu
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
-                .tooltip("Encircled Desktop")
+                .tooltip("Encircled Desktop · Standby")
                 .on_menu_event(|app, event| {
                     if event.id == tauri::menu::MenuId::new("quit") {
                         app.exit(0);
+                    } else if event.id == tauri::menu::MenuId::new("toggle") {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                    | TrayIconEvent::DoubleClick { .. } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
                     }
                 })
                 .build(app)?;
 
-            // Background HOI4 Process Polling Thread (emits process-status every 5s)
+            // Background HOI4 Process Polling Thread (emits process-status on change only)
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
+                let mut last_state: Option<(bool, bool)> = None;
                 loop {
-                    let (is_running, has_debug_flag) = check_hoi4_process();
-                    let _ = app_handle.emit(
-                        "process-status",
-                        ProcessStatusPayload {
-                            is_running,
-                            has_debug_flag,
-                        },
-                    );
-                    std::thread::sleep(Duration::from_secs(2));
+                    let current_state = check_hoi4_process();
+                    if last_state != Some(current_state) {
+                        last_state = Some(current_state);
+                        let (is_running, has_debug_flag) = current_state;
+                        let _ = app_handle.emit(
+                            "process-status",
+                            ProcessStatusPayload {
+                                is_running,
+                                has_debug_flag,
+                            },
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
                 }
             });
 
             // SQLite Offline Retry Worker Thread (retries failed uploads every 30s)
-            spawn_offline_retry_worker();
+            let shared_client = app.state::<AppState>().client.clone();
+            spawn_offline_retry_worker(shared_client);
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app_state = window.state::<AppState>();
+                let minimize = *app_state.minimize_to_tray.lock().unwrap();
+                if minimize {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             start_watching,
+            stop_watching,
             get_process_status,
             get_default_save_path_cmd,
-            select_save_folder
+            select_save_folder,
+            get_offline_queue,
+            clear_offline_queue,
+            retry_offline_queue_now,
+            get_autostart_status,
+            set_autostart,
+            check_for_updates_cmd,
+            get_minimize_to_tray_status,
+            set_minimize_to_tray,
+            get_app_version,
+            update_tray_tooltip
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

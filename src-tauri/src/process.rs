@@ -1,11 +1,28 @@
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use std::sync::Mutex;
+use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
+
+static SYSTEM_INSTANCE: Mutex<Option<System>> = Mutex::new(None);
 
 /// Checks if Hearts of Iron IV (hoi4.exe) is currently running and if it was launched with the `-debug` flag.
+/// Reuses a single static System instance with minimal process refresh specifics to keep CPU usage near 0%.
 pub fn check_hoi4_process() -> (bool, bool) {
-    let mut sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+    let mut lock = SYSTEM_INSTANCE.lock().unwrap();
+    let sys = lock.get_or_insert_with(|| {
+        System::new_with_specifics(
+            RefreshKind::new().with_processes(
+                ProcessRefreshKind::new()
+                    .with_cmd(UpdateKind::OnlyIfNotSet)
+                    .with_exe(UpdateKind::OnlyIfNotSet),
+            ),
+        )
+    });
+
+    sys.refresh_processes_specifics(
+        ProcessRefreshKind::new()
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_exe(UpdateKind::OnlyIfNotSet),
     );
-    sys.refresh_processes();
+
     let mut is_running = false;
     let mut has_debug = false;
 

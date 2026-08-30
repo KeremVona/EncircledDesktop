@@ -26,6 +26,7 @@ tauri-plugin-notification = "2.0.0-rc"
 tauri-plugin-updater = "2.0.0-rc"
 rusqlite = { version = "0.31", features = ["bundled"] }
 rfd = "0.14"
+tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
