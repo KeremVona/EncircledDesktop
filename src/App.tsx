@@ -96,7 +96,7 @@ function parseAndValidateSessionInput(input: string): ParsedSessionInput | null 
     if (normalized.startsWith("encircled://") || normalized.startsWith("encircled-desktop://")) {
       normalized = normalized.replace(/^encircled(-desktop)?:\/\//i, "http://dummy/");
     } else if (!/^https?:\/\//i.test(normalized)) {
-      if (/^(?:www\.)?encircledmp\.com/i.test(normalized)) {
+      if (/^(?:www\.)?encircled(?:mp)?\.com/i.test(normalized)) {
         normalized = "https://" + normalized;
       } else if (/^localhost(?::\d+)?/i.test(normalized)) {
         normalized = "http://" + normalized;

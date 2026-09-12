@@ -11,7 +11,7 @@ A lightweight, high-performance **Tauri v2** desktop application designed for **
 - **Anti-Cheat Telemetry**: Monitors running process command-line arguments to detect whether the game is running with `-debug` or `--debug` flags.
 - **Offline SQLite Queue**: Stores save uploads in a local SQLite database (`rusqlite`) when offline, retrying upload tasks automatically in a background loop when connectivity is restored.
 - **Native System Notifications & System Tray**: Runs unobtrusively in the background with native OS notifications and system tray controls.
-- **Deep Linking Support**: Handles custom `encircled://` URL schemes to easily sync web lobby sessions with the desktop application.
+- **Deep Linking & Session Sync**: Handles custom `encircled://` URL schemes and web lobby URLs (`https://encircledmp.com/lobbies/...`, `encircled.com`, or `localhost:5173`) to seamlessly sync match sessions with the desktop application.
 
 ---
 
@@ -54,6 +54,17 @@ A lightweight, high-performance **Tauri v2** desktop application designed for **
    ```bash
    npm run tauri dev
    ```
+
+### Environment & API Configuration
+
+| Environment | Backend API Base URL | Frontend Web / Lobby URL |
+| :--- | :--- | :--- |
+| **Production** | `https://api.encircledmp.com` | `https://encircledmp.com` (or `encircled.com`) |
+| **Development** | `http://localhost:5292` | `http://localhost:5173` |
+
+- **Automatic Environment Switching**: In debug mode (`npm run tauri dev`), the app connects to `http://localhost:5292`. In release/production builds (`npm run tauri build`), it points to `https://api.encircledmp.com`.
+- **Manual API Override**: You can override the backend endpoint at any time by setting the `ENCIRCLED_API_URL` environment variable.
+- **Link Acceptance**: The app accepts session URLs from `encircledmp.com` and `encircled.com` (with or without `www` and `https://`), `localhost:5173`, custom deep-link protocols (`encircled://`), or raw UUIDs.
 
 ---
 
