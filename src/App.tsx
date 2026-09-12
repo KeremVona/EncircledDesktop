@@ -5,7 +5,7 @@ import { Header } from "./components/Header";
 import { LobbyConnector } from "./components/LobbyConnector";
 import { FolderSelector } from "./components/FolderSelector";
 import { DiagnosticsHUD, StatusInfo } from "./components/DiagnosticsHUD";
-import { ActivityTabs, TelemetryLog, QueuedUpload, UpdateInfo } from "./components/ActivityTabs";
+import { ActivityTabs, TelemetryLog, QueuedUpload, UpdateInfo, UpdateProgress } from "./components/ActivityTabs";
 import "./App.css";
 
 interface ProcessStatusPayload {
@@ -196,6 +196,8 @@ export function App() {
   const [updaterStatus, setUpdaterStatus] = useState<string>("v1.0.0");
   const [updateAvailable, setUpdateAvailable] = useState<UpdateInfo | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
 
   function setAppStatus(text: string, type: StatusInfo["type"] = "idle") {
     setStatusInfo({ text, type });
@@ -216,6 +218,7 @@ export function App() {
     let unlistenProcess: () => void;
     let unlistenDeepLink: () => void;
     let unlistenTelemetry: () => void;
+    let unlistenUpdateProgress: () => void;
 
     async function initSystem() {
       // Fetch App Version
@@ -326,6 +329,14 @@ export function App() {
         }
         fetchOfflineQueue();
       });
+
+      // 8. Listen for auto-updater download progress
+      unlistenUpdateProgress = await listen<UpdateProgress>("update-progress", (event) => {
+        setUpdateProgress(event.payload);
+        if (event.payload.status === "restarting") {
+          setAppStatus("Update downloaded! Restarting Encircled...", "success");
+        }
+      });
     }
 
     async function fetchProcessStatus() {
@@ -351,6 +362,7 @@ export function App() {
       if (unlistenProcess) unlistenProcess();
       if (unlistenDeepLink) unlistenDeepLink();
       if (unlistenTelemetry) unlistenTelemetry();
+      if (unlistenUpdateProgress) unlistenUpdateProgress();
     };
   }, []);
 
@@ -553,7 +565,7 @@ export function App() {
     try {
       const res = await invoke<UpdateCheckResponse>("check_for_updates_cmd");
       if (res && res.available && res.version) {
-        setUpdateAvailable({ version: res.version });
+        setUpdateAvailable({ version: res.version, notes: res.body });
         setUpdaterStatus(`Update ${res.version} available!`);
         setAppStatus(`Update ${res.version} available!`, "success");
       } else {
@@ -566,6 +578,23 @@ export function App() {
       setAppStatus("Failed to check for updates", "warning");
     } finally {
       setIsCheckingUpdate(false);
+    }
+  }
+
+  // Install & Download Update Handler
+  async function handleInstallUpdate() {
+    setIsInstallingUpdate(true);
+    setUpdateProgress({ downloaded: 0, status: "downloading" });
+    setAppStatus("Downloading update installer from GitHub Releases...", "loading");
+
+    try {
+      await invoke("install_update_cmd");
+      setAppStatus("Update complete! Restarting...", "success");
+    } catch (err: any) {
+      setIsInstallingUpdate(false);
+      setUpdateProgress(null);
+      const errMsg = typeof err === "string" ? err : err?.message || "Failed to download and install update.";
+      setAppStatus(errMsg, "error");
     }
   }
 
@@ -656,6 +685,9 @@ export function App() {
             isCheckingUpdate={isCheckingUpdate}
             onCheckForUpdates={handleCheckForUpdates}
             updateAvailable={updateAvailable}
+            isInstallingUpdate={isInstallingUpdate}
+            onInstallUpdate={handleInstallUpdate}
+            updateProgress={updateProgress}
             formatTimestamp={formatTimestamp}
           />
         </main>

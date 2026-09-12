@@ -21,8 +21,9 @@ use uploader::spawn_offline_retry_worker;
 use watcher::{
     check_for_updates_cmd, clear_offline_queue, get_app_version, get_autostart_status,
     get_default_save_path_cmd, get_minimize_to_tray_status, get_offline_queue,
-    get_process_status, get_telemetry_history, retry_offline_queue_now, select_save_folder,
-    set_autostart, set_minimize_to_tray, start_watching, stop_watching, update_tray_tooltip,
+    get_process_status, get_telemetry_history, install_update_cmd, retry_offline_queue_now,
+    select_save_folder, set_autostart, set_minimize_to_tray, start_watching, stop_watching,
+    update_tray_tooltip,
 };
 
 fn main() {
@@ -188,6 +189,7 @@ fn main() {
             get_autostart_status,
             set_autostart,
             check_for_updates_cmd,
+            install_update_cmd,
             get_minimize_to_tray_status,
             set_minimize_to_tray,
             get_app_version,

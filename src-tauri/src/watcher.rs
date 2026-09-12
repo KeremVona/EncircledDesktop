@@ -745,6 +745,56 @@ pub async fn check_for_updates_cmd(app: AppHandle) -> Result<UpdateCheckResponse
     }
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct UpdateProgressPayload {
+    pub downloaded: usize,
+    pub total: Option<u64>,
+    pub status: String,
+}
+
+#[tauri::command]
+pub async fn install_update_cmd(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    if let Some(update) = update {
+        let app_clone = app.clone();
+        let mut downloaded = 0;
+        update
+            .download_and_install(
+                move |chunk_length, content_length| {
+                    downloaded += chunk_length;
+                    let _ = app_clone.emit(
+                        "update-progress",
+                        UpdateProgressPayload {
+                            downloaded,
+                            total: content_length,
+                            status: "downloading".into(),
+                        },
+                    );
+                },
+                move || {
+                    // Download complete callback
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressPayload {
+                downloaded: 0,
+                total: None,
+                status: "restarting".into(),
+            },
+        );
+
+        app.restart();
+    } else {
+        Err("No update available to install".into())
+    }
+}
+
 #[tauri::command]
 pub fn get_minimize_to_tray_status(state: State<'_, AppState>) -> bool {
     *state.minimize_to_tray.lock().unwrap()

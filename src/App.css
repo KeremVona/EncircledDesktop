@@ -1055,6 +1055,92 @@ html, body {
   font-weight: 600;
 }
 
+.update-available-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  background: var(--emerald-bg);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.85rem;
+  animation: fadeInDown 0.25s ease-out;
+}
+
+.update-available-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.update-available-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--emerald);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.btn-update-install {
+  background: var(--emerald);
+  color: #0b0f17;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+  flex-shrink: 0;
+}
+
+.btn-update-install:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.update-release-notes {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.15);
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  max-height: 80px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.update-progress-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.update-progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.update-progress-bar-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.update-progress-bar-fill {
+  height: 100%;
+  background: var(--emerald);
+  border-radius: var(--radius-full);
+  transition: width 0.2s ease;
+}
+
 /* Utility Classes */
 .text-emerald { color: var(--emerald) !important; }
 .text-sky { color: var(--sky) !important; }

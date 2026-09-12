@@ -29,6 +29,13 @@ export interface QueuedUpload {
 
 export interface UpdateInfo {
   version: string;
+  notes?: string;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total?: number;
+  status: "downloading" | "restarting" | "idle" | "error";
 }
 
 interface ActivityTabsProps {
@@ -45,6 +52,9 @@ interface ActivityTabsProps {
   isCheckingUpdate: boolean;
   onCheckForUpdates: () => void;
   updateAvailable: UpdateInfo | null;
+  isInstallingUpdate: boolean;
+  onInstallUpdate: () => void;
+  updateProgress: UpdateProgress | null;
   formatTimestamp: (raw: string) => string;
 }
 
@@ -62,6 +72,9 @@ export function ActivityTabs({
   isCheckingUpdate,
   onCheckForUpdates,
   updateAvailable,
+  isInstallingUpdate,
+  onInstallUpdate,
+  updateProgress,
   formatTimestamp,
 }: ActivityTabsProps) {
   const [activeTab, setActiveTab] = useState<"telemetry" | "queue" | "settings">("telemetry");
@@ -277,9 +290,56 @@ export function ActivityTabs({
             </div>
 
             {updateAvailable && (
-              <div className="update-available-banner">
-                <SparklesIcon size={16} />
-                <span>New version {updateAvailable.version} is available!</span>
+              <div className="update-available-card">
+                <div className="update-available-header">
+                  <div className="update-available-title">
+                    <SparklesIcon size={16} />
+                    <span>Version {updateAvailable.version} Available</span>
+                  </div>
+                  {!isInstallingUpdate && (
+                    <button
+                      type="button"
+                      onClick={onInstallUpdate}
+                      className="btn-update-install"
+                    >
+                      Download &amp; Install
+                    </button>
+                  )}
+                </div>
+
+                {updateAvailable.notes && (
+                  <div className="update-release-notes">
+                    {updateAvailable.notes}
+                  </div>
+                )}
+
+                {isInstallingUpdate && (
+                  <div className="update-progress-container">
+                    <div className="update-progress-label">
+                      <span>
+                        {updateProgress?.status === "restarting"
+                          ? "Download complete. Restarting app..."
+                          : updateProgress?.total
+                          ? `Downloading: ${(updateProgress.downloaded / (1024 * 1024)).toFixed(1)} MB / ${(updateProgress.total / (1024 * 1024)).toFixed(1)} MB (${Math.round((updateProgress.downloaded / updateProgress.total) * 100)}%)`
+                          : updateProgress?.downloaded
+                          ? `Downloading: ${(updateProgress.downloaded / (1024 * 1024)).toFixed(1)} MB...`
+                          : "Preparing installer..."}
+                      </span>
+                    </div>
+                    <div className="update-progress-bar-track">
+                      <div
+                        className="update-progress-bar-fill"
+                        style={{
+                          width: updateProgress?.total
+                            ? `${Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))}%`
+                            : updateProgress?.status === "restarting"
+                            ? "100%"
+                            : "35%",
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
