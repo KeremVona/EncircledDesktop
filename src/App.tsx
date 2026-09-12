@@ -189,6 +189,9 @@ export function App() {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   }
 
+  // Deep-link Invitation Prompt State
+  const [pendingInvite, setPendingInvite] = useState<{ sessionId: string; apiKey?: string } | null>(null);
+
   // Updater state
   const [updaterStatus, setUpdaterStatus] = useState<string>("v1.0.0");
   const [updateAvailable, setUpdateAvailable] = useState<UpdateInfo | null>(null);
@@ -283,7 +286,7 @@ export function App() {
       });
 
       // 6. Listen for browser deep link invitations (encircled://lobby/<id>?key=<key>)
-      unlistenDeepLink = await listen<string>("deep-link-received", async (event) => {
+      unlistenDeepLink = await listen<string>("deep-link-received", (event) => {
         try {
           const raw = typeof event.payload === "string" ? event.payload : "";
           const parsed = parseAndValidateSessionInput(raw);
@@ -293,30 +296,9 @@ export function App() {
             return;
           }
 
-          const { sessionId: room, apiKey: key } = parsed;
-          setSessionId(room);
-          if (key) {
-            setApiKey(key);
-          }
-          setAppStatus(`Linked to Lobby ${room.slice(0, 8)}... Starting watcher...`, "loading");
-
-          const rawStored = localStorage.getItem("encircled_custom_save_path");
-          const activePath = validateAndSanitizePath(rawStored) || null;
-
-          try {
-            await invoke("start_watching", {
-              sessionId: room,
-              apiKey: key || null,
-              path: activePath,
-            });
-            setIsWatching(true);
-            setAppStatus("Watching & Live Telemetry Linked 🟢", "active");
-            fetchOfflineQueue();
-          } catch (err: any) {
-            setIsWatching(false);
-            const errMsg = typeof err === "string" ? err : err?.message || "Failed to start save watcher.";
-            setAppStatus(errMsg, "error");
-          }
+          // Security: Prompt user to accept connection instead of auto-exfiltrating saves
+          setPendingInvite(parsed);
+          setAppStatus(`Lobby invitation received for ${parsed.sessionId.slice(0, 8)}... Action required.`, "active");
         } catch {
           setAppStatus("Error processing browser invitation link.", "error");
         }
@@ -407,6 +389,44 @@ export function App() {
     if (parsed?.apiKey) {
       setApiKey(parsed.apiKey);
     }
+  }
+
+  // Deep-link Invitation Handlers
+  async function handleAcceptInvite() {
+    if (!pendingInvite) return;
+    const invite = pendingInvite;
+    setPendingInvite(null);
+    setSessionId(invite.sessionId);
+    if (invite.apiKey) {
+      setApiKey(invite.apiKey);
+    }
+    setAppStatus(`Connecting to Lobby ${invite.sessionId.slice(0, 8)}...`, "loading");
+    setIsStartingWatcher(true);
+
+    const rawStored = localStorage.getItem("encircled_custom_save_path");
+    const activePath = validateAndSanitizePath(rawStored) || null;
+
+    try {
+      await invoke("start_watching", {
+        sessionId: invite.sessionId,
+        apiKey: invite.apiKey || null,
+        path: activePath,
+      });
+      setIsWatching(true);
+      setAppStatus("Watching & Live Telemetry Linked 🟢", "active");
+      fetchOfflineQueue();
+    } catch (err: any) {
+      setIsWatching(false);
+      const errMsg = typeof err === "string" ? err : err?.message || "Failed to start save watcher.";
+      setAppStatus(errMsg, "error");
+    } finally {
+      setIsStartingWatcher(false);
+    }
+  }
+
+  function handleDeclineInvite() {
+    setPendingInvite(null);
+    setAppStatus("Lobby invitation declined", "idle");
   }
 
   // Start Watcher Handler
@@ -567,6 +587,29 @@ export function App() {
         />
 
         <main className="main-content-layout">
+          {pendingInvite && (
+            <div className="invite-prompt-overlay" role="alert">
+              <div className="invite-prompt-content">
+                <div className="invite-prompt-title">
+                  <span>🔗</span>
+                  <span>Lobby Invitation Received</span>
+                </div>
+                <div className="invite-prompt-desc">
+                  A browser invitation requested connection to Match Lobby <code>{pendingInvite.sessionId.slice(0, 8)}...</code>
+                  {pendingInvite.apiKey ? " with Companion Key." : "."} Do you want to connect?
+                </div>
+              </div>
+              <div className="invite-prompt-actions">
+                <button className="invite-btn-accept" onClick={handleAcceptInvite} type="button">
+                  Accept &amp; Connect
+                </button>
+                <button className="invite-btn-decline" onClick={handleDeclineInvite} type="button">
+                  Decline
+                </button>
+              </div>
+            </div>
+          )}
+
           <LobbyConnector
             sessionId={sessionId}
             onSessionIdChange={handleSessionInputChange}

@@ -24,6 +24,7 @@ pub struct AppState {
     pub watcher_tx: Mutex<Option<mpsc::Sender<()>>>,
     pub client: Client,
     pub minimize_to_tray: Mutex<bool>,
+    pub watcher_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for AppState {
@@ -36,6 +37,7 @@ impl Default for AppState {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             minimize_to_tray: Mutex::new(true),
+            watcher_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }

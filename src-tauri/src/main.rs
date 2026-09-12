@@ -43,7 +43,6 @@ fn main() {
                 let _ = app.emit("deep-link-received", arg.clone());
             }
         }))
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

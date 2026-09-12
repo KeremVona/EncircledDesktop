@@ -1061,3 +1061,90 @@ html, body {
 .text-amber { color: var(--amber) !important; }
 .text-rose { color: var(--rose) !important; }
 .text-muted { color: var(--text-muted) !important; }
+
+/* Deep-link Invitation Prompt */
+.invite-prompt-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--card-bg);
+  border: 1px solid var(--sky);
+  box-shadow: 0 4px 16px rgba(56, 189, 248, 0.15);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1.15rem;
+  margin-bottom: 0.85rem;
+  gap: 1rem;
+  animation: fadeInDown 0.25s ease-out;
+}
+
+@keyframes fadeInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.invite-prompt-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.invite-prompt-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--sky);
+}
+
+.invite-prompt-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.invite-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.invite-btn-accept {
+  background: var(--sky);
+  color: #0b0f17;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.invite-btn-accept:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.invite-btn-decline {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.invite-btn-decline:hover {
+  background: var(--card-hover);
+  color: var(--text-primary);
+}

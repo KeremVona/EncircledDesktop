@@ -42,6 +42,13 @@ pub fn init_sqlite_db() -> Result<(), rusqlite::Error> {
     let db_path = get_db_path();
     let conn = Connection::open(db_path)?;
 
+    // Enable WAL mode, busy timeout, and normal sync for concurrency
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS queued_uploads (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,13 +58,23 @@ pub fn init_sqlite_db() -> Result<(), rusqlite::Error> {
             file_name TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             retry_count INTEGER DEFAULT 0,
-            api_key TEXT
+            api_key TEXT,
+            sequence_index INTEGER DEFAULT 0,
+            has_debug_flag INTEGER DEFAULT 0
         )",
         [],
     )?;
 
-    // Migration: add api_key column if upgrading from earlier schema
+    // Migrations: add columns if upgrading from earlier schema
     let _ = conn.execute("ALTER TABLE queued_uploads ADD COLUMN api_key TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE queued_uploads ADD COLUMN sequence_index INTEGER DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE queued_uploads ADD COLUMN has_debug_flag INTEGER DEFAULT 0",
+        [],
+    );
 
     // Make unique index to prevent duplicate autosaves from flooding the offline retry queue
     conn.execute(
@@ -108,18 +125,31 @@ where
     lock.as_ref().map(f)
 }
 
-pub fn enqueue_offline_upload(
-    session_id: &str,
-    file_path: &str,
-    file_hash: &str,
-    file_name: &str,
-    timestamp: &str,
-    api_key: Option<&str>,
-) {
+pub struct NewOfflineUpload<'a> {
+    pub session_id: &'a str,
+    pub file_path: &'a str,
+    pub file_hash: &'a str,
+    pub file_name: &'a str,
+    pub timestamp: &'a str,
+    pub api_key: Option<&'a str>,
+    pub sequence_index: u32,
+    pub has_debug_flag: bool,
+}
+
+pub fn enqueue_offline_upload(upload: &NewOfflineUpload<'_>) {
     with_db(|conn| {
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO queued_uploads (session_id, file_path, file_hash, file_name, timestamp, retry_count, api_key) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            params![session_id, file_path, file_hash, file_name, timestamp, api_key],
+            "INSERT OR IGNORE INTO queued_uploads (session_id, file_path, file_hash, file_name, timestamp, retry_count, api_key, sequence_index, has_debug_flag) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            params![
+                upload.session_id,
+                upload.file_path,
+                upload.file_hash,
+                upload.file_name,
+                upload.timestamp,
+                upload.api_key,
+                upload.sequence_index as i64,
+                if upload.has_debug_flag { 1 } else { 0 },
+            ],
         );
     });
 }
@@ -132,15 +162,20 @@ pub struct QueuedUpload {
     pub file_hash: String,
     pub file_name: String,
     pub timestamp: String,
+    pub sequence_index: u32,
+    pub has_debug_flag: bool,
+    #[serde(skip)]
     pub api_key: Option<String>,
 }
 
 pub fn get_pending_queued_uploads() -> Vec<QueuedUpload> {
     with_db(|conn| {
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, session_id, file_path, file_hash, file_name, timestamp, api_key FROM queued_uploads WHERE retry_count < 10 ORDER BY id DESC",
+            "SELECT id, session_id, file_path, file_hash, file_name, timestamp, api_key, sequence_index, has_debug_flag FROM queued_uploads WHERE retry_count < 10 ORDER BY id DESC",
         ) {
             let rows = stmt.query_map([], |row| {
+                let seq: i64 = row.get(7).unwrap_or(0);
+                let debug: i64 = row.get(8).unwrap_or(0);
                 Ok(QueuedUpload {
                     id: row.get(0)?,
                     session_id: row.get(1)?,
@@ -149,6 +184,8 @@ pub fn get_pending_queued_uploads() -> Vec<QueuedUpload> {
                     file_name: row.get(4)?,
                     timestamp: row.get(5)?,
                     api_key: row.get(6)?,
+                    sequence_index: seq as u32,
+                    has_debug_flag: debug != 0,
                 })
             });
             if let Ok(mapped) = rows {

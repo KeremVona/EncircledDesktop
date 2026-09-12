@@ -113,6 +113,10 @@ fn is_safe_watch_path(p: &std::path::Path) -> bool {
     if p_str.is_empty() || p_str.len() > 512 || p_str.contains('\0') || p_str.contains("..") {
         return false;
     }
+    // Block Windows UNC network paths (e.g. \\server\share or //server/share)
+    if p_str.starts_with(r"\\") || p_str.starts_with("//") {
+        return false;
+    }
     // Block system root directories
     if p == std::path::Path::new("/")
         || p == std::path::Path::new("C:\\")
@@ -143,6 +147,9 @@ pub async fn start_watching(
         }
     }
 
+    // Increment generational ID so any terminating previous watcher thread won't send disconnect
+    let current_gen = state.watcher_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
     // If a watcher is already running, we stop it by signaling its channel.
     let prev_tx = {
         let mut tx_guard = state.watcher_tx.lock().unwrap();
@@ -166,6 +173,13 @@ pub async fn start_watching(
         get_default_save_path()?
     };
 
+    // Prevent symlink or junction traversal attacks
+    if let Ok(sym_meta) = fs::symlink_metadata(&watch_path) {
+        if sym_meta.file_type().is_symlink() {
+            return Err("Symlink directories are not permitted for save monitoring".into());
+        }
+    }
+
     if !watch_path.exists() {
         if let Err(e) = fs::create_dir_all(&watch_path) {
             return Err(format!(
@@ -183,6 +197,8 @@ pub async fn start_watching(
     }
 
     let session_id_for_thread = session_id.clone();
+    let watcher_gen_shared = state.watcher_generation.clone();
+    let watcher_gen_for_thread = current_gen;
     let api_key_clone = api_key.clone();
     let watch_path_for_thread = watch_path.clone();
     let shared_client = state.client.clone();
@@ -300,6 +316,7 @@ pub async fn start_watching(
             let mut last_heartbeat = std::time::Instant::now();
 
             println!("Started watching: {:?}", watch_path_for_thread);
+            let canon_watch = fs::canonicalize(&watch_path_for_thread).ok();
 
             // Check watch directory on startup for the most recent save to verify/upload immediately
             if let Ok(entries) = fs::read_dir(&watch_path_for_thread) {
@@ -311,6 +328,19 @@ pub async fn start_watching(
                         && !fname.contains("temp")
                         && !fname.ends_with(".tmp")
                     {
+                        // Symlink check
+                        if let Ok(sym_meta) = fs::symlink_metadata(&p) {
+                            if sym_meta.file_type().is_symlink() {
+                                continue;
+                            }
+                        }
+                        // Canonical directory boundary check
+                        if let (Some(ref cw), Ok(cp)) = (&canon_watch, fs::canonicalize(&p)) {
+                            if !cp.starts_with(cw) {
+                                continue;
+                            }
+                        }
+
                         if let Ok(meta) = p.metadata() {
                             if let Ok(modified) = meta.modified() {
                                 hoi4_files.push((p, modified));
@@ -407,6 +437,20 @@ pub async fn start_watching(
                             if !path.exists() {
                                 continue;
                             }
+
+                            // Symlink check
+                            if let Ok(sym_meta) = fs::symlink_metadata(&path) {
+                                if sym_meta.file_type().is_symlink() {
+                                    continue;
+                                }
+                            }
+                            // Canonical directory boundary check
+                            if let (Some(ref cw), Ok(cp)) = (&canon_watch, fs::canonicalize(&path)) {
+                                if !cp.starts_with(cw) {
+                                    continue;
+                                }
+                            }
+
                             sequence_index += 1;
                             let seq = sequence_index;
                             println!("Detected save file change (Seq #{}): {:?}", seq, path);
@@ -436,22 +480,26 @@ pub async fn start_watching(
                 }
             }
 
-            // On watcher stop, inform the server of disconnect
-            let dc_client = client.clone();
-            let dc_session_id = session_id.clone();
-            let dc_key = api_key_clone.clone();
-            let dc_base_url = get_api_base_url();
-            tauri::async_runtime::spawn(async move {
-                let mut dc_req = dc_client
-                    .post(format!("{}/api/lobbies/{}/desktop/disconnect", dc_base_url, dc_session_id))
-                    .json(&serde_json::json!({
-                        "companionKey": dc_key
-                    }));
-                if let Some(ref k) = dc_key {
-                    dc_req = dc_req.header("X-Companion-Key", k);
-                }
-                let _ = dc_req.send().await;
-            });
+            // On watcher stop, inform the server of disconnect only if no newer watcher generation took over
+            if watcher_gen_shared.load(std::sync::atomic::Ordering::SeqCst) == watcher_gen_for_thread {
+                let dc_client = client.clone();
+                let dc_session_id = session_id.clone();
+                let dc_key = api_key_clone.clone();
+                let dc_base_url = get_api_base_url();
+                tauri::async_runtime::spawn(async move {
+                    let mut dc_req = dc_client
+                        .post(format!("{}/api/lobbies/{}/desktop/disconnect", dc_base_url, dc_session_id))
+                        .json(&serde_json::json!({
+                            "companionKey": dc_key
+                        }));
+                    if let Some(ref k) = dc_key {
+                        dc_req = dc_req.header("X-Companion-Key", k);
+                    }
+                    let _ = dc_req.send().await;
+                });
+            } else {
+                println!("Skipping server disconnect: newer watcher session is already active.");
+            }
         }));
 
         if let Err(panic_err) = result {
@@ -518,6 +566,11 @@ pub async fn retry_offline_queue_now(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
+    let _guard = match crate::uploader::RETRY_MUTEX.try_lock() {
+        Ok(g) => g,
+        Err(_) => return Err("Retry is already in progress".into()),
+    };
+
     let client = state.client.clone();
     let pending = crate::db::get_pending_queued_uploads();
     let mut success_count = 0;
@@ -528,58 +581,80 @@ pub async fn retry_offline_queue_now(
             continue;
         }
 
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.len() > crate::uploader::MAX_SAVE_FILE_SIZE {
-                crate::db::delete_queued_upload(item.id);
+        // Anti-cheat / Hash mismatch check: If autosave was overwritten while offline, prune stale entry
+        match crate::uploader::compute_file_sha256(&path) {
+            Ok(current_hash) => {
+                if current_hash != item.file_hash {
+                    eprintln!(
+                        "Manual retry: item ID {} ({}) was overwritten while offline (hash changed from {} to {}). Pruning stale entry.",
+                        item.id, item.file_name, item.file_hash, current_hash
+                    );
+                    crate::db::delete_queued_upload(item.id);
+                    continue;
+                }
+            }
+            Err(e) => {
+                eprintln!("Error hashing queued file {:?}: {}", path, e);
                 continue;
             }
         }
 
-        if let Ok(buffer) = fs::read(&path) {
-            let mut form = reqwest::multipart::Form::new()
-                .text("session_id", item.session_id.clone())
-                .text("player_steam_id", "local_player")
-                .text("file_hash", item.file_hash.clone())
-                .text("timestamp", item.timestamp.clone())
-                .part(
-                    "savefile",
-                    reqwest::multipart::Part::bytes(buffer)
-                        .file_name(item.file_name.clone())
-                        .mime_str("application/octet-stream")
-                        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(vec![])),
-                );
-
-            if let Some(ref k) = item.api_key {
-                form = form.text("companion_key", k.clone());
+        if let Ok(meta) = fs::metadata(&path) {
+            let file_len = meta.len();
+            if file_len > crate::uploader::MAX_SAVE_FILE_SIZE {
+                crate::db::delete_queued_upload(item.id);
+                continue;
             }
 
-            let retry_base_url = get_api_base_url();
-            let mut retry_req = client
-                .post(format!("{}/api/parse-save", retry_base_url))
-                .multipart(form);
-            if let Some(ref k) = item.api_key {
-                retry_req = retry_req.header("X-Companion-Key", k);
-            }
-            let res = retry_req.send().await;
+            if let Ok(async_file) = tokio::fs::File::open(&path).await {
+                let stream = tokio_util::io::ReaderStream::new(async_file);
+                let body = reqwest::Body::wrap_stream(stream);
+                if let Ok(file_part) = reqwest::multipart::Part::stream_with_length(body, file_len)
+                    .file_name(item.file_name.clone())
+                    .mime_str("application/octet-stream")
+                {
+                    let mut form = reqwest::multipart::Form::new()
+                        .text("session_id", item.session_id.clone())
+                        .text("player_steam_id", "local_player")
+                        .text("file_hash", item.file_hash.clone())
+                        .text("sequence_index", item.sequence_index.to_string())
+                        .text("timestamp", item.timestamp.clone())
+                        .text("has_debug_flag", item.has_debug_flag.to_string())
+                        .part("savefile", file_part);
 
-            match res {
-                Ok(r) if r.status().is_success() => {
-                    crate::db::delete_queued_upload(item.id);
-                    let status_msg = format!("Queued autosave {} synced & verified", item.file_name);
-                    let payload = TelemetryPayload {
-                        file_name: item.file_name.clone(),
-                        file_hash: item.file_hash.clone(),
-                        status: status_msg.clone(),
-                        verified: true,
-                        has_debug_flag: false,
-                        timestamp: item.timestamp.clone(),
-                    };
-                    crate::db::record_telemetry_event(&item.session_id, &payload);
-                    let _ = app.emit("telemetry-event", &payload);
-                    success_count += 1;
-                }
-                _ => {
-                    crate::db::increment_queued_upload_retry(item.id);
+                    if let Some(ref k) = item.api_key {
+                        form = form.text("companion_key", k.clone());
+                    }
+
+                    let retry_base_url = get_api_base_url();
+                    let mut retry_req = client
+                        .post(format!("{}/api/parse-save", retry_base_url))
+                        .multipart(form);
+                    if let Some(ref k) = item.api_key {
+                        retry_req = retry_req.header("X-Companion-Key", k);
+                    }
+                    let res = retry_req.send().await;
+
+                    match res {
+                        Ok(r) if r.status().is_success() => {
+                            crate::db::delete_queued_upload(item.id);
+                            let status_msg = format!("Queued autosave {} (Seq #{}) synced & verified", item.file_name, item.sequence_index);
+                            let payload = TelemetryPayload {
+                                file_name: item.file_name.clone(),
+                                file_hash: item.file_hash.clone(),
+                                status: status_msg.clone(),
+                                verified: true,
+                                has_debug_flag: item.has_debug_flag,
+                                timestamp: item.timestamp.clone(),
+                            };
+                            crate::db::record_telemetry_event(&item.session_id, &payload);
+                            let _ = app.emit("telemetry-event", &payload);
+                            success_count += 1;
+                        }
+                        _ => {
+                            crate::db::increment_queued_upload_retry(item.id);
+                        }
+                    }
                 }
             }
         }
@@ -726,5 +801,8 @@ mod tests {
         assert!(!is_safe_watch_path(std::path::Path::new("C:\\")));
         assert!(!is_safe_watch_path(std::path::Path::new("/")));
         assert!(!is_safe_watch_path(std::path::Path::new("../escape")));
+        // UNC paths must be blocked
+        assert!(!is_safe_watch_path(std::path::Path::new(r"\\evil-server\share")));
+        assert!(!is_safe_watch_path(std::path::Path::new("//evil-server/share")));
     }
 }

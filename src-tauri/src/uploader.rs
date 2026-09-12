@@ -1,4 +1,4 @@
-use crate::db::enqueue_offline_upload;
+use crate::db::{enqueue_offline_upload, NewOfflineUpload};
 use crate::models::TelemetryPayload;
 use crate::process::check_hoi4_process;
 use crate::watcher::get_api_base_url;
@@ -15,9 +15,22 @@ use tokio_util::io::ReaderStream;
 
 pub const MAX_SAVE_FILE_SIZE: u64 = 250 * 1024 * 1024; // 250 MB cap
 
+pub static RETRY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// P-2: Compute SHA-256 hash using a small 64 KB streaming buffer without reading entire file into RAM.
+/// Retries file open up to 4 times with 250ms backoff to handle Windows sharing locks (Error 32) when HOI4 is saving.
 pub fn compute_file_sha256(file_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let file = fs::File::open(file_path)?;
+    let mut attempts = 0;
+    let file = loop {
+        match fs::File::open(file_path) {
+            Ok(f) => break f,
+            Err(_) if attempts < 4 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
+    };
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
     let mut chunk = [0u8; 64 * 1024];
@@ -139,7 +152,17 @@ pub async fn process_and_upload(
         );
 
         // P-2 & P-3: Stream file directly from disk into HTTP multipart body without buffering 200MB in RAM
-        let async_file = tokio::fs::File::open(file_path).await?;
+        let mut attempts = 0;
+        let async_file = loop {
+            match tokio::fs::File::open(file_path).await {
+                Ok(f) => break f,
+                Err(_) if attempts < 4 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(e) => return Err(Box::new(e)),
+            }
+        };
         let stream = ReaderStream::new(async_file);
         let body = reqwest::Body::wrap_stream(stream);
         let file_part = multipart::Part::stream_with_length(body, file_len)
@@ -210,14 +233,16 @@ pub async fn process_and_upload(
                     let _ = app.emit("telemetry-event", payload);
                 } else {
                     println!("Failed/offline upload attempt. Adding to SQLite queue.");
-                    enqueue_offline_upload(
+                    enqueue_offline_upload(&NewOfflineUpload {
                         session_id,
-                        &file_path.to_string_lossy(),
-                        &hash,
-                        &file_name,
-                        &timestamp,
+                        file_path: &file_path.to_string_lossy(),
+                        file_hash: &hash,
+                        file_name: &file_name,
+                        timestamp: &timestamp,
                         api_key,
-                    );
+                        sequence_index,
+                        has_debug_flag,
+                    });
 
                     let payload = TelemetryPayload {
                         file_name: file_name.clone(),
@@ -234,14 +259,16 @@ pub async fn process_and_upload(
             Err(e) => {
                 eprintln!("Upload network error: {}", e);
                 println!("Failed/offline upload attempt. Adding to SQLite queue.");
-                enqueue_offline_upload(
+                enqueue_offline_upload(&NewOfflineUpload {
                     session_id,
-                    &file_path.to_string_lossy(),
-                    &hash,
-                    &file_name,
-                    &timestamp,
+                    file_path: &file_path.to_string_lossy(),
+                    file_hash: &hash,
+                    file_name: &file_name,
+                    timestamp: &timestamp,
                     api_key,
-                );
+                    sequence_index,
+                    has_debug_flag,
+                });
 
                 let payload = TelemetryPayload {
                     file_name: file_name.clone(),
@@ -288,12 +315,36 @@ pub fn spawn_offline_retry_worker(client: Client, app: AppHandle) {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
 
+            let _guard = match RETRY_MUTEX.try_lock() {
+                Ok(g) => g,
+                Err(_) => continue, // Manual or another background retry in progress
+            };
+
             let pending = crate::db::get_pending_queued_uploads();
             for item in pending {
                 let path = PathBuf::from(&item.file_path);
                 if !path.exists() {
                     crate::db::delete_queued_upload(item.id);
                     continue;
+                }
+
+                // Anti-cheat / Hash mismatch check: If autosave.hoi4 was overwritten while offline,
+                // retrying with the old hash will cause a hash mismatch / anti-cheat ban!
+                match compute_file_sha256(&path) {
+                    Ok(current_hash) => {
+                        if current_hash != item.file_hash {
+                            eprintln!(
+                                "Queued item ID {} ({}) was overwritten while offline (hash changed from {} to {}). Pruning stale entry.",
+                                item.id, item.file_name, item.file_hash, current_hash
+                            );
+                            crate::db::delete_queued_upload(item.id);
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error hashing queued file {:?}: {}", path, e);
+                        continue;
+                    }
                 }
 
                 if let Ok(meta) = fs::metadata(&path) {
@@ -315,7 +366,9 @@ pub fn spawn_offline_retry_worker(client: Client, app: AppHandle) {
                                 .text("session_id", item.session_id.clone())
                                 .text("player_steam_id", "local_player")
                                 .text("file_hash", item.file_hash.clone())
+                                .text("sequence_index", item.sequence_index.to_string())
                                 .text("timestamp", item.timestamp.clone())
+                                .text("has_debug_flag", item.has_debug_flag.to_string())
                                 .part("savefile", file_part);
 
                             if let Some(ref k) = item.api_key {
@@ -335,13 +388,13 @@ pub fn spawn_offline_retry_worker(client: Client, app: AppHandle) {
                                 Ok(r) if r.status().is_success() => {
                                     println!("Retry upload succeeded for queued item ID {}", item.id);
                                     crate::db::delete_queued_upload(item.id);
-                                    let status_msg = format!("Queued autosave {} synced & verified", item.file_name);
+                                    let status_msg = format!("Queued autosave {} (Seq #{}) synced & verified", item.file_name, item.sequence_index);
                                     let payload = TelemetryPayload {
                                         file_name: item.file_name.clone(),
                                         file_hash: item.file_hash.clone(),
                                         status: status_msg.clone(),
                                         verified: true,
-                                        has_debug_flag: false,
+                                        has_debug_flag: item.has_debug_flag,
                                         timestamp: item.timestamp.clone(),
                                     };
                                     crate::db::record_telemetry_event(&item.session_id, &payload);
