@@ -1,4 +1,4 @@
-use crate::models::{AppState, ProcessStatusPayload};
+use crate::models::{AppState, ProcessStatusPayload, TelemetryPayload};
 use crate::process::check_hoi4_process;
 use crate::uploader::process_and_upload;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
@@ -9,7 +9,18 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
 pub fn get_api_base_url() -> String {
-    std::env::var("ENCIRCLED_API_URL").unwrap_or_else(|_| "http://localhost:5292".to_string())
+    if let Ok(url) = std::env::var("ENCIRCLED_API_URL") {
+        let trimmed = url.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if cfg!(debug_assertions) {
+        "http://localhost:5292".to_string()
+    } else {
+        "https://api.encircledmp.com".to_string()
+    }
 }
 
 pub fn get_default_save_path() -> Result<PathBuf, String> {
@@ -133,11 +144,12 @@ pub async fn start_watching(
     }
 
     // If a watcher is already running, we stop it by signaling its channel.
-    {
+    let prev_tx = {
         let mut tx_guard = state.watcher_tx.lock().unwrap();
-        if let Some(tx) = tx_guard.take() {
-            let _ = tx.send(()); // Signal to stop previous watcher
-        }
+        tx_guard.take()
+    };
+    if let Some(tx) = prev_tx {
+        let _ = tx.send(()).await; // Signal to stop previous watcher
     }
 
     let watch_path = if let Some(p) = path.clone() {
@@ -175,41 +187,70 @@ pub async fn start_watching(
     let watch_path_for_thread = watch_path.clone();
     let shared_client = state.client.clone();
 
-    // Notify server of active watcher
+    // Notify and verify connection with server BEFORE launching watcher loop
     let connect_client = shared_client.clone();
     let connect_session_id = session_id.clone();
     let connect_key = api_key.clone();
     let connect_path_str = watch_path.to_string_lossy().to_string();
     let base_url = get_api_base_url();
-    tauri::async_runtime::spawn(async move {
-        let mut conn_req = connect_client
-            .post(format!(
-                "{}/api/lobbies/{}/desktop/connect",
-                base_url, connect_session_id
-            ));
-        if let Some(ref k) = connect_key {
-            conn_req = conn_req.header("X-Companion-Key", k);
-        }
-        let _ = conn_req.send().await;
 
-        let watcher_payload = serde_json::json!({
-            "isActive": true,
-            "saveFolderPath": connect_path_str,
-            "isValidated": true,
-            "companionKey": connect_key
-        });
-
-        let mut watcher_req = connect_client
-            .post(format!(
-                "{}/api/lobbies/{}/desktop/watcher-status",
-                base_url, connect_session_id
-            ))
-            .json(&watcher_payload);
-        if let Some(ref k) = connect_key {
-            watcher_req = watcher_req.header("X-Companion-Key", k);
-        }
-        let _ = watcher_req.send().await;
+    // 1. Send Desktop Connect
+    let connect_payload = serde_json::json!({
+        "companionKey": connect_key
     });
+    let mut conn_req = connect_client
+        .post(format!(
+            "{}/api/lobbies/{}/desktop/connect",
+            base_url, connect_session_id
+        ))
+        .json(&connect_payload);
+    if let Some(ref k) = connect_key {
+        conn_req = conn_req.header("X-Companion-Key", k);
+    }
+
+    let conn_res = conn_req.send().await.map_err(|e| {
+        format!("Network connection failed: could not reach Encircled server at {}. ({})", base_url, e)
+    })?;
+
+    if !conn_res.status().is_success() {
+        let status = conn_res.status();
+        let err_body = conn_res.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            return Err("Unauthorized: Invalid or missing Companion Key. Please copy the full pairing key from the website.".to_string());
+        } else if status.as_u16() == 404 {
+            return Err("Lobby not found. Please verify the Match ID / UUID.".to_string());
+        } else {
+            return Err(format!("Server rejected desktop connection (HTTP {}): {}", status, err_body));
+        }
+    }
+
+    // 2. Send Watcher Status Active
+    let watcher_payload = serde_json::json!({
+        "isActive": true,
+        "saveFolderPath": connect_path_str,
+        "isValidated": true,
+        "companionKey": connect_key
+    });
+
+    let mut watcher_req = connect_client
+        .post(format!(
+            "{}/api/lobbies/{}/desktop/watcher-status",
+            base_url, connect_session_id
+        ))
+        .json(&watcher_payload);
+    if let Some(ref k) = connect_key {
+        watcher_req = watcher_req.header("X-Companion-Key", k);
+    }
+
+    let watcher_res = watcher_req.send().await.map_err(|e| {
+        format!("Failed to register watcher status with server: {}", e)
+    })?;
+
+    if !watcher_res.status().is_success() {
+        let status = watcher_res.status();
+        let err_body = watcher_res.text().await.unwrap_or_default();
+        return Err(format!("Failed to activate watcher on server (HTTP {}): {}", status, err_body));
+    }
 
     let app_for_thread = app.clone();
     std::thread::spawn(move || {
@@ -260,6 +301,54 @@ pub async fn start_watching(
 
             println!("Started watching: {:?}", watch_path_for_thread);
 
+            // Check watch directory on startup for the most recent save to verify/upload immediately
+            if let Ok(entries) = fs::read_dir(&watch_path_for_thread) {
+                let mut hoi4_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let fname = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    if p.extension().and_then(|e| e.to_str()) == Some("hoi4")
+                        && !fname.contains("temp")
+                        && !fname.ends_with(".tmp")
+                    {
+                        if let Ok(meta) = p.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                hoi4_files.push((p, modified));
+                            }
+                        }
+                    }
+                }
+                hoi4_files.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+                if let Some((latest_path, mod_time)) = hoi4_files.into_iter().next() {
+                    if let Ok(elapsed) = mod_time.elapsed() {
+                        if elapsed < Duration::from_secs(24 * 3600) {
+                            sequence_index += 1;
+                            let seq = sequence_index;
+                            let init_session = session_id.clone();
+                            let init_key = api_key_clone.clone();
+                            let init_client = client.clone();
+                            let init_app = app_for_thread.clone();
+                            tauri::async_runtime::spawn(async move {
+                                println!("Verifying initial latest save file on startup: {:?}", latest_path);
+                                if let Err(e) = process_and_upload(
+                                    &init_app,
+                                    &init_client,
+                                    &latest_path,
+                                    &init_session,
+                                    init_key.as_deref(),
+                                    seq,
+                                )
+                                .await
+                                {
+                                    eprintln!("Error verifying initial save file: {}", e);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+
             loop {
                 // Check if we should stop
                 if stop_rx.try_recv().is_ok() {
@@ -274,13 +363,31 @@ pub async fn start_watching(
                     let hb_session_id = session_id.clone();
                     let hb_base_url = get_api_base_url();
                     let hb_key = api_key_clone.clone();
+                    let app_hb = app_for_thread.clone();
                     tauri::async_runtime::spawn(async move {
                         let mut hb_req = hb_client
-                            .post(format!("{}/api/lobbies/{}/desktop/heartbeat", hb_base_url, hb_session_id));
+                            .post(format!("{}/api/lobbies/{}/desktop/heartbeat", hb_base_url, hb_session_id))
+                            .json(&serde_json::json!({
+                                "companionKey": hb_key
+                            }));
                         if let Some(ref k) = hb_key {
                             hb_req = hb_req.header("X-Companion-Key", k);
                         }
-                        let _ = hb_req.send().await;
+                        if let Ok(res) = hb_req.send().await {
+                            if res.status().as_u16() == 401 {
+                                let _ = app_hb.emit(
+                                    "telemetry-event",
+                                    serde_json::json!({
+                                        "file_name": "Heartbeat",
+                                        "file_hash": "AUTH_LOST",
+                                        "status": "ERROR: Heartbeat rejected (Unauthorized companion key)",
+                                        "verified": false,
+                                        "has_debug_flag": false,
+                                        "timestamp": ""
+                                    }),
+                                );
+                            }
+                        }
                     });
                 }
 
@@ -305,6 +412,7 @@ pub async fn start_watching(
                             println!("Detected save file change (Seq #{}): {:?}", seq, path);
 
                             let session_id_clone = session_id.clone();
+                            let api_key_clone_upload = api_key_clone.clone();
                             let client_clone = client.clone();
                             let path_clone = path.clone();
                             let app_clone = app_for_thread.clone();
@@ -315,6 +423,7 @@ pub async fn start_watching(
                                     &client_clone,
                                     &path_clone,
                                     &session_id_clone,
+                                    api_key_clone_upload.as_deref(),
                                     seq,
                                 )
                                 .await
@@ -334,7 +443,10 @@ pub async fn start_watching(
             let dc_base_url = get_api_base_url();
             tauri::async_runtime::spawn(async move {
                 let mut dc_req = dc_client
-                    .post(format!("{}/api/lobbies/{}/desktop/disconnect", dc_base_url, dc_session_id));
+                    .post(format!("{}/api/lobbies/{}/desktop/disconnect", dc_base_url, dc_session_id))
+                    .json(&serde_json::json!({
+                        "companionKey": dc_key
+                    }));
                 if let Some(ref k) = dc_key {
                     dc_req = dc_req.header("X-Companion-Key", k);
                 }
@@ -371,9 +483,12 @@ pub async fn stop_watching(app: AppHandle, state: State<'_, AppState>) -> Result
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_tooltip(Some("Encircled Desktop · Standby".to_string()));
     }
-    let mut tx_guard = state.watcher_tx.lock().unwrap();
-    if let Some(tx) = tx_guard.take() {
-        let _ = tx.send(());
+    let prev_tx = {
+        let mut tx_guard = state.watcher_tx.lock().unwrap();
+        tx_guard.take()
+    };
+    if let Some(tx) = prev_tx {
+        let _ = tx.send(()).await;
         Ok("Watcher stopped".into())
     } else {
         Ok("No active watcher was running".into())
@@ -399,7 +514,10 @@ pub fn clear_offline_queue() -> Result<usize, String> {
 }
 
 #[tauri::command]
-pub async fn retry_offline_queue_now(state: State<'_, AppState>) -> Result<usize, String> {
+pub async fn retry_offline_queue_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
     let client = state.client.clone();
     let pending = crate::db::get_pending_queued_uploads();
     let mut success_count = 0;
@@ -418,7 +536,7 @@ pub async fn retry_offline_queue_now(state: State<'_, AppState>) -> Result<usize
         }
 
         if let Ok(buffer) = fs::read(&path) {
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .text("session_id", item.session_id.clone())
                 .text("player_steam_id", "local_player")
                 .text("file_hash", item.file_hash.clone())
@@ -431,16 +549,33 @@ pub async fn retry_offline_queue_now(state: State<'_, AppState>) -> Result<usize
                         .unwrap_or_else(|_| reqwest::multipart::Part::bytes(vec![])),
                 );
 
+            if let Some(ref k) = item.api_key {
+                form = form.text("companion_key", k.clone());
+            }
+
             let retry_base_url = get_api_base_url();
-            let res = client
+            let mut retry_req = client
                 .post(format!("{}/api/parse-save", retry_base_url))
-                .multipart(form)
-                .send()
-                .await;
+                .multipart(form);
+            if let Some(ref k) = item.api_key {
+                retry_req = retry_req.header("X-Companion-Key", k);
+            }
+            let res = retry_req.send().await;
 
             match res {
                 Ok(r) if r.status().is_success() => {
                     crate::db::delete_queued_upload(item.id);
+                    let status_msg = format!("Queued autosave {} synced & verified", item.file_name);
+                    let payload = TelemetryPayload {
+                        file_name: item.file_name.clone(),
+                        file_hash: item.file_hash.clone(),
+                        status: status_msg.clone(),
+                        verified: true,
+                        has_debug_flag: false,
+                        timestamp: item.timestamp.clone(),
+                    };
+                    crate::db::record_telemetry_event(&item.session_id, &payload);
+                    let _ = app.emit("telemetry-event", &payload);
                     success_count += 1;
                 }
                 _ => {
@@ -450,6 +585,11 @@ pub async fn retry_offline_queue_now(state: State<'_, AppState>) -> Result<usize
         }
     }
     Ok(success_count)
+}
+
+#[tauri::command]
+pub fn get_telemetry_history() -> Vec<TelemetryPayload> {
+    crate::db::get_recent_telemetry_history(50)
 }
 
 #[tauri::command]
@@ -545,4 +685,46 @@ pub fn set_minimize_to_tray(enable: bool, state: State<'_, AppState>) -> bool {
 #[tauri::command]
 pub fn get_app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_api_base_url_default_in_debug() {
+        std::env::remove_var("ENCIRCLED_API_URL");
+        let url = get_api_base_url();
+        assert_eq!(url, "http://localhost:5292");
+    }
+
+    #[test]
+    fn test_get_api_base_url_env_override() {
+        std::env::set_var("ENCIRCLED_API_URL", "https://custom.api.encircledmp.com/");
+        let url = get_api_base_url();
+        assert_eq!(url, "https://custom.api.encircledmp.com");
+        std::env::remove_var("ENCIRCLED_API_URL");
+    }
+
+    #[test]
+    fn test_uuid_validation() {
+        assert!(is_valid_uuid_format("12345678-1234-1234-1234-123456789abc"));
+        assert!(!is_valid_uuid_format("invalid-uuid"));
+        assert!(!is_valid_uuid_format("12345678-1234-1234-1234-123456789abg"));
+    }
+
+    #[test]
+    fn test_api_key_validation() {
+        assert!(is_valid_api_key_format("my-valid_key-123"));
+        assert!(!is_valid_api_key_format(""));
+        assert!(!is_valid_api_key_format("key with spaces"));
+    }
+
+    #[test]
+    fn test_safe_watch_path() {
+        assert!(is_safe_watch_path(std::path::Path::new("C:\\Users\\user\\Documents")));
+        assert!(!is_safe_watch_path(std::path::Path::new("C:\\")));
+        assert!(!is_safe_watch_path(std::path::Path::new("/")));
+        assert!(!is_safe_watch_path(std::path::Path::new("../escape")));
+    }
 }

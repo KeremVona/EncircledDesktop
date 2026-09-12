@@ -7,7 +7,7 @@ A lightweight, high-performance **Tauri v2** desktop application designed for **
 ## Features
 
 - **Automated Save File Monitoring**: Continuously watches the local Paradox HOI4 save games directory for `.hoi4` autosaves using efficient file system debouncing.
-- **Zstd Compression & Streaming**: Compresses save files on the fly using `zstd` before securely uploading them to the Encircled backend server.
+- **Streaming Disk Uploads**: Streams large save files directly from disk into HTTP multipart requests using asynchronous chunk buffers without buffering multi-hundred-megabyte files into RAM.
 - **Anti-Cheat Telemetry**: Monitors running process command-line arguments to detect whether the game is running with `-debug` or `--debug` flags.
 - **Offline SQLite Queue**: Stores save uploads in a local SQLite database (`rusqlite`) when offline, retrying upload tasks automatically in a background loop when connectivity is restored.
 - **Native System Notifications & System Tray**: Runs unobtrusively in the background with native OS notifications and system tray controls.
@@ -20,7 +20,7 @@ A lightweight, high-performance **Tauri v2** desktop application designed for **
 - **Frontend**: React, TypeScript, Vite
 - **Backend Core**: Rust (Tauri v2)
 - **Database**: SQLite (`rusqlite` bundled)
-- **Key Rust Crates**: `tauri` v2, `tokio`, `notify-debouncer-mini`, `reqwest`, `sha2`, `zstd`, `sysinfo`, `tauri-plugin-deep-link`, `tauri-plugin-notification`
+- **Key Rust Crates**: `tauri` v2, `tokio`, `notify-debouncer-mini`, `reqwest`, `sha2`, `sysinfo`, `tauri-plugin-deep-link`, `tauri-plugin-notification`, `tauri-plugin-single-instance`
 
 ---
 

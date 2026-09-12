@@ -46,12 +46,12 @@ export function DiagnosticsHUD({
           {isHoi4Running ? (
             <span className="status-badge-inline success">
               <CheckCircleIcon size={14} />
-              <span>Running</span>
+              <span>Game Running</span>
             </span>
           ) : (
             <span className="status-badge-inline muted">
               <XCircleIcon size={14} />
-              <span>Not Detected</span>
+              <span>Not Running</span>
             </span>
           )}
         </div>

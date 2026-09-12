@@ -21,8 +21,8 @@ use uploader::spawn_offline_retry_worker;
 use watcher::{
     check_for_updates_cmd, clear_offline_queue, get_app_version, get_autostart_status,
     get_default_save_path_cmd, get_minimize_to_tray_status, get_offline_queue,
-    get_process_status, retry_offline_queue_now, select_save_folder, set_autostart,
-    set_minimize_to_tray, start_watching, stop_watching, update_tray_tooltip,
+    get_process_status, get_telemetry_history, retry_offline_queue_now, select_save_folder,
+    set_autostart, set_minimize_to_tray, start_watching, stop_watching, update_tray_tooltip,
 };
 
 fn main() {
@@ -33,6 +33,16 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            if let Some(arg) = args.iter().find(|a| a.starts_with("encircled://") || a.starts_with("encircled-desktop://")) {
+                let _ = app.emit("deep-link-received", arg.clone());
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
@@ -69,9 +79,15 @@ fn main() {
             let menu = Menu::with_items(app, &[&toggle_i, &quit_i])?;
 
             // Setup system tray icon & menu
-            let _tray = TrayIconBuilder::with_id("main-tray")
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
-                .tooltip("Encircled Desktop · Standby")
+                .tooltip("Encircled Desktop · Standby");
+
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+
+            let _tray = tray_builder
                 .on_menu_event(|app, event| {
                     if event.id == tauri::menu::MenuId::new("quit") {
                         app.exit(0);
@@ -109,30 +125,43 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Background HOI4 Process Polling Thread (emits process-status on change only)
+            // Background HOI4 Process Polling Thread (emits process-status on change and periodic heartbeat)
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut last_state: Option<(bool, bool)> = None;
+                let mut tick_count: u32 = 0;
                 loop {
                     let current_state = check_hoi4_process();
-                    if last_state != Some(current_state) {
+                    tick_count = tick_count.wrapping_add(1);
+                    let state_changed = last_state != Some(current_state);
+                    let heartbeat = tick_count.is_multiple_of(5);
+
+                    if state_changed || heartbeat {
                         last_state = Some(current_state);
                         let (is_running, has_debug_flag) = current_state;
-                        let _ = app_handle.emit(
+                        if state_changed {
+                            println!(
+                                "[Process] HOI4 status changed: is_running={}, has_debug_flag={}",
+                                is_running, has_debug_flag
+                            );
+                        }
+                        if let Err(e) = app_handle.emit(
                             "process-status",
                             ProcessStatusPayload {
                                 is_running,
                                 has_debug_flag,
                             },
-                        );
+                        ) {
+                            eprintln!("[Process] Failed to emit process-status: {}", e);
+                        }
                     }
-                    std::thread::sleep(Duration::from_secs(3));
+                    std::thread::sleep(Duration::from_secs(2));
                 }
             });
 
             // SQLite Offline Retry Worker Thread (retries failed uploads every 30s)
             let shared_client = app.state::<AppState>().client.clone();
-            spawn_offline_retry_worker(shared_client);
+            spawn_offline_retry_worker(shared_client, app.handle().clone());
 
             Ok(())
         })
@@ -156,6 +185,7 @@ fn main() {
             get_offline_queue,
             clear_offline_queue,
             retry_offline_queue_now,
+            get_telemetry_history,
             get_autostart_status,
             set_autostart,
             check_for_updates_cmd,

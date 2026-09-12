@@ -37,9 +37,9 @@
       "schemes": ["encircled", "encircled-desktop"]
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IGF1dG91cGRhdGUgcHVibGljIGtleQ...",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg0Q0E4MzhFMTNEOThCMjEKUldRaGk5a1Rqb1BLaEFkRFR1ejhTOVAralI2cWdlQXRBMk1lekdtM2pldkMvU3NyY0dyLzZJMDgK",
       "endpoints": [
-        "https://api.yourdomain.com/updates/{{target}}/{{current_version}}"
+        "https://api.encircledmp.com/api/updates/{{target}}/{{current_version}}"
       ]
     }
   }

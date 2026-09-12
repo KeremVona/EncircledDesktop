@@ -80,17 +80,36 @@ function parseAndValidateSessionInput(input: string): ParsedSessionInput | null 
     return { sessionId: trimmed.toLowerCase() };
   }
 
+  // Check for delimiter formats: <uuid>:<key> or <uuid>#<key> or <uuid> <key>
+  const delimiterMatch = trimmed.match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[:#\s]([a-zA-Z0-9_-]{1,128})$/i
+  );
+  if (delimiterMatch) {
+    return {
+      sessionId: delimiterMatch[1].toLowerCase(),
+      apiKey: delimiterMatch[2].trim(),
+    };
+  }
+
   try {
-    let urlObj: URL;
-    if (trimmed.startsWith("encircled://") || trimmed.startsWith("encircled-desktop://")) {
-      urlObj = new URL(trimmed.replace(/^encircled(-desktop)?:\/\//i, "http://dummy/"));
-    } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-      urlObj = new URL(trimmed);
-    } else if (trimmed.includes("?key=") || trimmed.includes("&key=")) {
-      urlObj = new URL("http://dummy/" + trimmed.replace(/^\/+/, ""));
-    } else {
-      return null;
+    let normalized = trimmed;
+    if (normalized.startsWith("encircled://") || normalized.startsWith("encircled-desktop://")) {
+      normalized = normalized.replace(/^encircled(-desktop)?:\/\//i, "http://dummy/");
+    } else if (!/^https?:\/\//i.test(normalized)) {
+      if (/^(?:www\.)?encircledmp\.com/i.test(normalized)) {
+        normalized = "https://" + normalized;
+      } else if (/^localhost(?::\d+)?/i.test(normalized)) {
+        normalized = "http://" + normalized;
+      } else if (normalized.includes("?key=") || normalized.includes("&key=")) {
+        normalized = "http://dummy/" + normalized.replace(/^\/+/, "");
+      } else if (normalized.includes("/lobbies/") || normalized.includes("/lobby/")) {
+        normalized = "http://dummy/" + normalized.replace(/^\/+/, "");
+      } else {
+        return null;
+      }
     }
+
+    const urlObj = new URL(normalized);
 
     let room = "";
     const pathname = urlObj.pathname;
@@ -110,7 +129,7 @@ function parseAndValidateSessionInput(input: string): ParsedSessionInput | null 
     }
 
     let key: string | undefined = undefined;
-    const rawKey = urlObj.searchParams.get("key");
+    const rawKey = urlObj.searchParams.get("key") || urlObj.searchParams.get("companion_key");
     if (rawKey && isValidApiKey(rawKey)) {
       key = rawKey.trim();
     }
@@ -231,7 +250,15 @@ export function App() {
         // Non-fatal
       }
 
-      // 3. Hydrate Offline Queue
+      // 3. Hydrate Telemetry History & Offline Queue
+      try {
+        const history = await invoke<TelemetryLog[]>("get_telemetry_history");
+        if (history && Array.isArray(history) && history.length > 0) {
+          setTelemetryLogs(history);
+        }
+      } catch (err) {
+        console.warn("Could not load telemetry history:", err);
+      }
       fetchOfflineQueue();
 
       // 4. Hydrate Autostart and Minimize-to-tray status
@@ -283,10 +310,12 @@ export function App() {
               path: activePath,
             });
             setIsWatching(true);
-            setAppStatus("Watching & Live Telemetry Linked", "active");
+            setAppStatus("Watching & Live Telemetry Linked 🟢", "active");
             fetchOfflineQueue();
-          } catch {
-            setAppStatus("Failed to start save watcher. Please check save folder path.", "error");
+          } catch (err: any) {
+            setIsWatching(false);
+            const errMsg = typeof err === "string" ? err : err?.message || "Failed to start save watcher.";
+            setAppStatus(errMsg, "error");
           }
         } catch {
           setAppStatus("Error processing browser invitation link.", "error");
@@ -295,10 +324,20 @@ export function App() {
 
       // 7. Listen for save telemetry upload events
       unlistenTelemetry = await listen<TelemetryLog>("telemetry-event", (event) => {
-        setTelemetryLogs((prev) => [event.payload, ...prev.slice(0, 19)]);
+        setTelemetryLogs((prev) => {
+          const exists = prev.some(
+            (l) => l.file_hash === event.payload.file_hash && l.status === event.payload.status
+          );
+          if (exists) return prev;
+          return [event.payload, ...prev.slice(0, 49)];
+        });
         if (event.payload.verified) {
-          setAppStatus(`Uploaded & Verified ${event.payload.file_name}`, "success");
-        } else if (event.payload.status.startsWith("ERROR") || event.payload.status.startsWith("FATAL")) {
+          setAppStatus(`Verified ${event.payload.file_name}`, "success");
+        } else if (
+          event.payload.status.startsWith("ERROR") ||
+          event.payload.status.startsWith("FATAL") ||
+          event.payload.status.startsWith("REJECTED")
+        ) {
           setAppStatus(event.payload.status, "error");
         } else {
           setAppStatus(event.payload.status, "active");
@@ -307,12 +346,26 @@ export function App() {
       });
     }
 
+    async function fetchProcessStatus() {
+      try {
+        const current = await invoke<ProcessStatusPayload>("get_process_status");
+        if (current) {
+          setIsHoi4Running(current.is_running);
+          setHasDebugFlag(current.has_debug_flag);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+
     initSystem();
 
     const queueInterval = setInterval(fetchOfflineQueue, 10000);
+    const processInterval = setInterval(fetchProcessStatus, 2500);
 
     return () => {
       clearInterval(queueInterval);
+      clearInterval(processInterval);
       if (unlistenProcess) unlistenProcess();
       if (unlistenDeepLink) unlistenDeepLink();
       if (unlistenTelemetry) unlistenTelemetry();
@@ -348,6 +401,14 @@ export function App() {
     setAppStatus("Reset to auto-detected default directory", "idle");
   }
 
+  function handleSessionInputChange(value: string) {
+    setSessionId(value);
+    const parsed = parseAndValidateSessionInput(value);
+    if (parsed?.apiKey) {
+      setApiKey(parsed.apiKey);
+    }
+  }
+
   // Start Watcher Handler
   async function handleStartWatching() {
     const raw = sessionId.trim();
@@ -373,7 +434,7 @@ export function App() {
     if (effectiveKey) setApiKey(effectiveKey);
 
     setIsStartingWatcher(true);
-    setAppStatus("Starting filesystem watcher...", "loading");
+    setAppStatus("Connecting to Encircled server...", "loading");
 
     try {
       const effectivePath = validateAndSanitizePath(savePath) || null;
@@ -383,10 +444,12 @@ export function App() {
         path: effectivePath,
       });
       setIsWatching(true);
-      setAppStatus("Watching & Live Telemetry Active", "active");
+      setAppStatus("Watching & Live Telemetry Active 🟢", "active");
       fetchOfflineQueue();
-    } catch {
-      setAppStatus("Could not initialize watcher. Verify that the save folder exists and is readable.", "error");
+    } catch (err: any) {
+      setIsWatching(false);
+      const errMsg = typeof err === "string" ? err : err?.message || "Could not initialize watcher. Verify connection and save folder.";
+      setAppStatus(errMsg, "error");
     } finally {
       setIsStartingWatcher(false);
     }
@@ -506,7 +569,9 @@ export function App() {
         <main className="main-content-layout">
           <LobbyConnector
             sessionId={sessionId}
-            onSessionIdChange={setSessionId}
+            onSessionIdChange={handleSessionInputChange}
+            apiKey={apiKey}
+            onApiKeyChange={setApiKey}
             isSessionValid={isSessionInputValid}
             parsedUuid={parsedInputPreview?.sessionId}
             hasKey={Boolean(apiKey)}
@@ -527,7 +592,11 @@ export function App() {
           <DiagnosticsHUD
             isHoi4Running={isHoi4Running}
             hasDebugFlag={hasDebugFlag}
-            statusInfo={statusInfo}
+            statusInfo={
+              statusInfo.type === "idle" && isHoi4Running
+                ? { text: "HOI4 Active · Ready to Link Lobby", type: "active" }
+                : statusInfo
+            }
           />
 
           <ActivityTabs

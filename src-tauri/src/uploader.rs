@@ -36,6 +36,7 @@ pub async fn process_and_upload(
     client: &Client,
     file_path: &Path,
     session_id: &str,
+    api_key: Option<&str>,
     sequence_index: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file_name = file_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -54,17 +55,16 @@ pub async fn process_and_upload(
             "Save file {} rejected: size {} bytes exceeds 250 MB cap",
             file_name, file_len
         );
-        let _ = app.emit(
-            "telemetry-event",
-            TelemetryPayload {
-                file_name: file_name.clone(),
-                file_hash: "OVERSIZED".into(),
-                status: format!("REJECTED: File size ({:.1} MB) exceeds 250 MB limit", (file_len as f64) / (1024.0 * 1024.0)),
-                verified: false,
-                has_debug_flag,
-                timestamp,
-            },
-        );
+        let payload = TelemetryPayload {
+            file_name: file_name.clone(),
+            file_hash: "OVERSIZED".into(),
+            status: format!("REJECTED: File size ({:.1} MB) exceeds 250 MB limit", (file_len as f64) / (1024.0 * 1024.0)),
+            verified: false,
+            has_debug_flag,
+            timestamp,
+        };
+        crate::db::record_telemetry_event(session_id, &payload);
+        let _ = app.emit("telemetry-event", payload);
         return Err("File size exceeds 250 MB limit".into());
     }
 
@@ -89,11 +89,13 @@ pub async fn process_and_upload(
     println!("Verifying save hash preflight with server: {}", hash);
 
     let base_url = get_api_base_url();
-    let verify_res = client
+    let mut verify_req = client
         .post(format!("{}/api/verify-hash", base_url))
-        .json(&verify_payload)
-        .send()
-        .await;
+        .json(&verify_payload);
+    if let Some(k) = api_key {
+        verify_req = verify_req.header("X-Companion-Key", k);
+    }
+    let verify_res = verify_req.send().await;
 
     let mut should_upload = true;
     let mut verified = false;
@@ -112,17 +114,16 @@ pub async fn process_and_upload(
             eprintln!("Preflight verification rejected (HTTP {}): {}", status, err_text);
             if status.as_u16() == 409 || status.as_u16() == 422 || status.as_u16() == 400 {
                 should_upload = false;
-                let _ = app.emit(
-                    "telemetry-event",
-                    TelemetryPayload {
-                        file_name: file_name.clone(),
-                        file_hash: hash.clone(),
-                        status: format!("REJECTED: Preflight validation failure ({})", status),
-                        verified: false,
-                        has_debug_flag,
-                        timestamp: timestamp.clone(),
-                    },
-                );
+                let payload = TelemetryPayload {
+                    file_name: file_name.clone(),
+                    file_hash: hash.clone(),
+                    status: format!("REJECTED: Preflight validation failure ({})", status),
+                    verified: false,
+                    has_debug_flag,
+                    timestamp: timestamp.clone(),
+                };
+                crate::db::record_telemetry_event(session_id, &payload);
+                let _ = app.emit("telemetry-event", payload);
             }
         }
     } else {
@@ -145,7 +146,7 @@ pub async fn process_and_upload(
             .file_name(file_name.clone())
             .mime_str("application/octet-stream")?;
 
-        let form = multipart::Form::new()
+        let mut form = multipart::Form::new()
             .text("session_id", session_id.to_string())
             .text("player_steam_id", "local_player")
             .text("file_hash", hash.clone())
@@ -154,29 +155,33 @@ pub async fn process_and_upload(
             .text("has_debug_flag", has_debug_flag.to_string())
             .part("savefile", file_part);
 
-        let upload_res = client
+        if let Some(k) = api_key {
+            form = form.text("companion_key", k.to_string());
+        }
+
+        let mut upload_req = client
             .post(format!("{}/api/parse-save", base_url))
-            .multipart(form)
-            .send()
-            .await;
+            .multipart(form);
+        if let Some(k) = api_key {
+            upload_req = upload_req.header("X-Companion-Key", k);
+        }
+        let upload_res = upload_req.send().await;
 
         match upload_res {
             Ok(res) if res.status().is_success() => {
                 println!("Successfully uploaded save file!");
                 
                 let status_msg = format!("Autosave {} (Seq #{}) uploaded & verified", file_name, sequence_index);
-                
-                let _ = app.emit(
-                    "telemetry-event",
-                    TelemetryPayload {
-                        file_name: file_name.clone(),
-                        file_hash: hash.clone(),
-                        status: status_msg.clone(),
-                        verified,
-                        has_debug_flag,
-                        timestamp,
-                    },
-                );
+                let payload = TelemetryPayload {
+                    file_name: file_name.clone(),
+                    file_hash: hash.clone(),
+                    status: status_msg.clone(),
+                    verified,
+                    has_debug_flag,
+                    timestamp,
+                };
+                crate::db::record_telemetry_event(session_id, &payload);
+                let _ = app.emit("telemetry-event", &payload);
 
                 // Native Notification
                 let _ = app
@@ -193,17 +198,16 @@ pub async fn process_and_upload(
 
                 if status.as_u16() == 409 || status.as_u16() == 422 {
                     // Anti-fraud rejection: do not queue offline retry for fraud saves
-                    let _ = app.emit(
-                        "telemetry-event",
-                        TelemetryPayload {
-                            file_name: file_name.clone(),
-                            file_hash: hash.clone(),
-                            status: format!("INTEGRITY REJECTED: {}", err_text),
-                            verified: false,
-                            has_debug_flag,
-                            timestamp: timestamp.clone(),
-                        },
-                    );
+                    let payload = TelemetryPayload {
+                        file_name: file_name.clone(),
+                        file_hash: hash.clone(),
+                        status: format!("INTEGRITY REJECTED: {}", err_text),
+                        verified: false,
+                        has_debug_flag,
+                        timestamp: timestamp.clone(),
+                    };
+                    crate::db::record_telemetry_event(session_id, &payload);
+                    let _ = app.emit("telemetry-event", payload);
                 } else {
                     println!("Failed/offline upload attempt. Adding to SQLite queue.");
                     enqueue_offline_upload(
@@ -212,19 +216,19 @@ pub async fn process_and_upload(
                         &hash,
                         &file_name,
                         &timestamp,
+                        api_key,
                     );
 
-                    let _ = app.emit(
-                        "telemetry-event",
-                        TelemetryPayload {
-                            file_name: file_name.clone(),
-                            file_hash: hash.clone(),
-                            status: "Offline - Queued in SQLite".into(),
-                            verified: false,
-                            has_debug_flag,
-                            timestamp,
-                        },
-                    );
+                    let payload = TelemetryPayload {
+                        file_name: file_name.clone(),
+                        file_hash: hash.clone(),
+                        status: "Offline - Queued in SQLite".into(),
+                        verified: false,
+                        has_debug_flag,
+                        timestamp,
+                    };
+                    crate::db::record_telemetry_event(session_id, &payload);
+                    let _ = app.emit("telemetry-event", payload);
                 }
             }
             Err(e) => {
@@ -236,29 +240,50 @@ pub async fn process_and_upload(
                     &hash,
                     &file_name,
                     &timestamp,
+                    api_key,
                 );
 
-                let _ = app.emit(
-                    "telemetry-event",
-                    TelemetryPayload {
-                        file_name: file_name.clone(),
-                        file_hash: hash.clone(),
-                        status: "Offline - Queued in SQLite".into(),
-                        verified: false,
-                        has_debug_flag,
-                        timestamp,
-                    },
-                );
+                let payload = TelemetryPayload {
+                    file_name: file_name.clone(),
+                    file_hash: hash.clone(),
+                    status: "Offline - Queued in SQLite".into(),
+                    verified: false,
+                    has_debug_flag,
+                    timestamp,
+                };
+                crate::db::record_telemetry_event(session_id, &payload);
+                let _ = app.emit("telemetry-event", payload);
             }
         }
     } else {
         println!("Server indicated upload is not required (Hash already verified).");
+        if verified {
+            let status_msg = format!("Autosave {} (Seq #{}) verified on server", file_name, sequence_index);
+            let payload = TelemetryPayload {
+                file_name: file_name.clone(),
+                file_hash: hash.clone(),
+                status: status_msg.clone(),
+                verified: true,
+                has_debug_flag,
+                timestamp: timestamp.clone(),
+            };
+            crate::db::record_telemetry_event(session_id, &payload);
+            let _ = app.emit("telemetry-event", &payload);
+
+            // Native Notification
+            let _ = app
+                .notification()
+                .builder()
+                .title("HOI4 Save Telemetry")
+                .body(format!("{} (Debug Flag: {})", status_msg, has_debug_flag))
+                .show();
+        }
     }
 
     Ok(())
 }
 
-pub fn spawn_offline_retry_worker(client: Client) {
+pub fn spawn_offline_retry_worker(client: Client, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -283,27 +308,44 @@ pub fn spawn_offline_retry_worker(client: Client) {
                         let stream = ReaderStream::new(async_file);
                         let body = reqwest::Body::wrap_stream(stream);
                         if let Ok(file_part) = multipart::Part::stream_with_length(body, file_len)
-                            .file_name(item.file_name)
+                            .file_name(item.file_name.clone())
                             .mime_str("application/octet-stream")
                         {
-                            let form = multipart::Form::new()
-                                .text("session_id", item.session_id)
+                            let mut form = multipart::Form::new()
+                                .text("session_id", item.session_id.clone())
                                 .text("player_steam_id", "local_player")
-                                .text("file_hash", item.file_hash)
-                                .text("timestamp", item.timestamp)
+                                .text("file_hash", item.file_hash.clone())
+                                .text("timestamp", item.timestamp.clone())
                                 .part("savefile", file_part);
 
+                            if let Some(ref k) = item.api_key {
+                                form = form.text("companion_key", k.clone());
+                            }
+
                             let retry_base_url = get_api_base_url();
-                            let res = client
+                            let mut retry_req = client
                                 .post(format!("{}/api/parse-save", retry_base_url))
-                                .multipart(form)
-                                .send()
-                                .await;
+                                .multipart(form);
+                            if let Some(ref k) = item.api_key {
+                                retry_req = retry_req.header("X-Companion-Key", k);
+                            }
+                            let res = retry_req.send().await;
 
                             match res {
                                 Ok(r) if r.status().is_success() => {
                                     println!("Retry upload succeeded for queued item ID {}", item.id);
                                     crate::db::delete_queued_upload(item.id);
+                                    let status_msg = format!("Queued autosave {} synced & verified", item.file_name);
+                                    let payload = TelemetryPayload {
+                                        file_name: item.file_name.clone(),
+                                        file_hash: item.file_hash.clone(),
+                                        status: status_msg.clone(),
+                                        verified: true,
+                                        has_debug_flag: false,
+                                        timestamp: item.timestamp.clone(),
+                                    };
+                                    crate::db::record_telemetry_event(&item.session_id, &payload);
+                                    let _ = app.emit("telemetry-event", &payload);
                                 }
                                 _ => {
                                     crate::db::increment_queued_upload_retry(item.id);

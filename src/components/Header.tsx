@@ -1,4 +1,4 @@
-import { RadarIcon, SunIcon, MoonIcon } from "./Icons";
+import { SunIcon, MoonIcon } from "./Icons";
 
 interface HeaderProps {
   appVersion: string;
@@ -16,8 +16,8 @@ export function Header({
   return (
     <header className="app-header">
       <div className="header-brand">
-        <div className="radar-badge">
-          <RadarIcon size={20} className={isWatching ? "radar-spinning" : ""} />
+        <div className={`brand-logo-badge ${isWatching ? "logo-active" : ""}`}>
+          <img src="/encircled_logo.svg" alt="Encircled" className="brand-logo-img" />
         </div>
         <div className="brand-text">
           <div className="title-row">

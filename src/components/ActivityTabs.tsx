@@ -123,22 +123,45 @@ export function ActivityTabs({
               </div>
             ) : (
               <div className="feed-list">
-                {telemetryLogs.map((log, index) => (
-                  <div key={index} className="feed-card">
-                    <div className="feed-card-header">
-                      <strong className="feed-file-name">{log.file_name}</strong>
-                      <span className={`pill-status ${log.verified ? "verified" : "uploaded"}`}>
-                        {log.verified ? "Verified ✓" : "Uploaded"}
-                      </span>
+                {telemetryLogs.map((log, index) => {
+                  const isRejected =
+                    log.status.includes("REJECTED") ||
+                    log.status.includes("ERROR") ||
+                    log.status.includes("FATAL");
+                  const isOffline = log.status.includes("Offline") || log.status.includes("Queued in SQLite");
+                  const pillClass = log.verified
+                    ? "verified"
+                    : isRejected
+                    ? "error"
+                    : isOffline
+                    ? "warning"
+                    : "uploaded";
+                  const pillLabel = log.verified
+                    ? "Verified ✓"
+                    : isRejected
+                    ? "Rejected"
+                    : isOffline
+                    ? "Queued"
+                    : "Uploaded";
+
+                  return (
+                    <div key={index} className="feed-card">
+                      <div className="feed-card-header">
+                        <strong className="feed-file-name">{log.file_name}</strong>
+                        <span className={`pill-status ${pillClass}`}>{pillLabel}</span>
+                      </div>
+                      {log.status && (
+                        <div className="feed-card-status-detail">{log.status}</div>
+                      )}
+                      <div className="feed-card-meta">
+                        <span className="feed-hash font-code">
+                          SHA: {log.file_hash.length > 16 ? `${log.file_hash.substring(0, 16)}...` : log.file_hash}
+                        </span>
+                        <span className="feed-time">{formatTimestamp(log.timestamp)}</span>
+                      </div>
                     </div>
-                    <div className="feed-card-meta">
-                      <span className="feed-hash font-code">
-                        SHA: {log.file_hash.substring(0, 16)}...
-                      </span>
-                      <span className="feed-time">{formatTimestamp(log.timestamp)}</span>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

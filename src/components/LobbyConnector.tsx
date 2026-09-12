@@ -3,6 +3,8 @@ import { CheckIcon, AlertTriangleIcon, BoltIcon, RefreshIcon, StopIcon, LinkIcon
 interface LobbyConnectorProps {
   sessionId: string;
   onSessionIdChange: (value: string) => void;
+  apiKey: string;
+  onApiKeyChange: (value: string) => void;
   isSessionValid: boolean;
   parsedUuid?: string;
   hasKey: boolean;
@@ -16,6 +18,8 @@ interface LobbyConnectorProps {
 export function LobbyConnector({
   sessionId,
   onSessionIdChange,
+  apiKey,
+  onApiKeyChange,
   isSessionValid,
   parsedUuid,
   hasKey,
@@ -49,7 +53,7 @@ export function LobbyConnector({
 
       <div className="input-block">
         <label htmlFor="lobby-input" className="input-label">
-          Lobby ID or Invitation Link
+          Lobby ID or Pairing Link
         </label>
         <div className="input-wrapper">
           <input
@@ -62,7 +66,7 @@ export function LobbyConnector({
                 onStartWatching();
               }
             }}
-            placeholder="Paste match URL or 36-character UUID..."
+            placeholder="Paste match URL, pairing link (UUID?key=...), or UUID..."
             className="text-input font-code"
             spellCheck="false"
             autoComplete="off"
@@ -77,17 +81,50 @@ export function LobbyConnector({
                 <span>
                   Valid Match ID: <strong className="font-code">{parsedUuid?.slice(0, 18)}...</strong>
                 </span>
-                {hasKey && <span className="key-pill">Key Linked ✓</span>}
+                {hasKey ? (
+                  <span className="key-pill" title="Companion API Key is linked and authorized">
+                    Key Linked ✓
+                  </span>
+                ) : (
+                  <span className="key-pill warning" title="Pairing link without key. Paste the full pairing link from the lobby modal for verified host telemetry.">
+                    No Auth Key
+                  </span>
+                )}
               </div>
             ) : (
               <div className="validation-item warning">
                 <AlertTriangleIcon size={14} />
-                <span>Please enter a valid 36-character UUID or match invitation link</span>
+                <span>Please enter a valid 36-character UUID or match pairing link</span>
               </div>
             )}
           </div>
         )}
       </div>
+
+      {isSessionValid && !hasKey && (
+        <div className="input-block" style={{ marginTop: "0.5rem" }}>
+          <label htmlFor="api-key-input" className="input-label">
+            Companion Auth Key (from Lobby Pairing Modal)
+          </label>
+          <div className="input-wrapper">
+            <input
+              id="api-key-input"
+              type="text"
+              value={apiKey}
+              onChange={(e) => onApiKeyChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isStarting) {
+                  onStartWatching();
+                }
+              }}
+              placeholder="Paste companion API key..."
+              className="text-input font-code"
+              spellCheck="false"
+              autoComplete="off"
+            />
+          </div>
+        </div>
+      )}
 
       <div className="action-buttons-group">
         <button

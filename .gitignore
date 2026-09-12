@@ -31,3 +31,4 @@ src-tauri/target/
 Thumbs.db
 
 .agents
+.tauri-updater.key*
