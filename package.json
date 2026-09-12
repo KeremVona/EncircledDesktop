@@ -1,6 +1,6 @@
 {
   "name": "hoi4-save-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "HOI4 Save Monitor",
   "scripts": {
     "dev": "vite",
