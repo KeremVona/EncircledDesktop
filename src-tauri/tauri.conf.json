@@ -37,7 +37,7 @@
       "schemes": ["encircled", "encircled-desktop"]
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg0Q0E4MzhFMTNEOThCMjEKUldRaGk5a1Rqb1BLaEFkRFR1ejhTOVAralI2cWdlQXRBMk1lekdtM2pldkMvU3NyY0dyLzZJMDgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwMzA4ODkwMUM5MDM5NTEKUldSUk9aQWNrSWd3OEpyT2M0WWRrQ242SGdOTjd0M0d1UVFKVkMycWxXZStES1ZCRWdFZW9pTHkK",
       "endpoints": [
         "https://github.com/KeremVona/EncircledDesktop/releases/latest/download/latest.json"
       ]
