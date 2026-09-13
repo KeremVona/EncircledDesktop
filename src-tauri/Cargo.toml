@@ -1,6 +1,6 @@
 [package]
 name = "hoi4-save-monitor"
-version = "1.0.1"
+version = "1.0.2"
 description = "A Tauri App"
 authors = ["Kerem Vona <vonavona50@gmail.com>"]
 edition = "2021"
