@@ -2,8 +2,9 @@
 name = "hoi4-save-monitor"
 version = "1.0.1"
 description = "A Tauri App"
-authors = ["you"]
+authors = ["Kerem Vona <vonavona50@gmail.com>"]
 edition = "2021"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0-rc", features = [] }
