@@ -85,3 +85,9 @@ Encircled monitors your local Hearts of Iron IV save game directory solely to pa
 - **Monitored Path:** `%USERPROFILE%\Documents\Paradox Interactive\Hearts of Iron IV\save games` or the path under OneDrive
 - **Data Collected:** Parsed game statistics, country tags, player identifiers, match timestamps and more, please refer to the [Privacy Policy](https://github.com/KeremVona/EncircledDesktop/blob/main/PrivacyPolicy.md) and [Terms of Service](https://github.com/KeremVona/EncircledDesktop/blob/main/TermsOfService.md).
 - **Controls:** File watching can be stopped in the app or by closing the app.
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
