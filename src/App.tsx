@@ -161,6 +161,8 @@ export function App() {
   const [isHoi4Running, setIsHoi4Running] = useState(false);
   const [hasDebugFlag, setHasDebugFlag] = useState(false);
   const [telemetryLogs, setTelemetryLogs] = useState<TelemetryLog[]>([]);
+  const [hasMoreTelemetry, setHasMoreTelemetry] = useState(true);
+  const [isLoadingMoreTelemetry, setIsLoadingMoreTelemetry] = useState(false);
 
   // Offline Queue State
   const [offlineQueue, setOfflineQueue] = useState<QueuedUpload[]>([]);
@@ -221,65 +223,50 @@ export function App() {
     let unlistenUpdateProgress: () => void;
 
     async function initSystem() {
-      // Fetch App Version
-      try {
-        const ver = await invoke<string>("get_app_version");
-        if (ver) {
-          setAppVersion(ver);
-          setUpdaterStatus(`v${ver}`);
+      // Parallel hydration of independent startup data for instant responsiveness
+      const [verRes, defaultPathRes, processRes, historyRes, queueRes, autoRes, minRes] =
+        await Promise.allSettled([
+          invoke<string>("get_app_version"),
+          invoke<string>("get_default_save_path_cmd"),
+          invoke<ProcessStatusPayload>("get_process_status"),
+          invoke<TelemetryLog[]>("get_telemetry_history", { limit: 15, offset: 0 }),
+          invoke<QueuedUpload[]>("get_offline_queue"),
+          invoke<boolean>("get_autostart_status"),
+          invoke<boolean>("get_minimize_to_tray_status"),
+        ]);
+
+      if (verRes.status === "fulfilled" && verRes.value) {
+        setAppVersion(verRes.value);
+        setUpdaterStatus(`v${verRes.value}`);
+      }
+
+      if (defaultPathRes.status === "fulfilled" && defaultPathRes.value) {
+        const validated = validateAndSanitizePath(defaultPathRes.value);
+        if (validated) {
+          setDefaultPath(validated);
         }
-      } catch {
-        // Fallback
       }
 
-      // 1. Fetch default detected save directory
-      try {
-        const detected = await invoke<string>("get_default_save_path_cmd");
-        if (detected) {
-          const validated = validateAndSanitizePath(detected);
-          if (validated) {
-            setDefaultPath(validated);
-          }
-        }
-      } catch {
-        // Non-fatal
+      if (processRes.status === "fulfilled" && processRes.value) {
+        setIsHoi4Running(processRes.value.is_running);
+        setHasDebugFlag(processRes.value.has_debug_flag);
       }
 
-      // 2. Initial HOI4 Process State Hydration
-      try {
-        const current = await invoke<ProcessStatusPayload>("get_process_status");
-        if (current) {
-          setIsHoi4Running(current.is_running);
-          setHasDebugFlag(current.has_debug_flag);
-        }
-      } catch {
-        // Non-fatal
+      if (historyRes.status === "fulfilled" && Array.isArray(historyRes.value)) {
+        setTelemetryLogs(historyRes.value);
+        setHasMoreTelemetry(historyRes.value.length >= 15);
       }
 
-      // 3. Hydrate Telemetry History & Offline Queue
-      try {
-        const history = await invoke<TelemetryLog[]>("get_telemetry_history");
-        if (history && Array.isArray(history) && history.length > 0) {
-          setTelemetryLogs(history);
-        }
-      } catch (err) {
-        console.warn("Could not load telemetry history:", err);
-      }
-      fetchOfflineQueue();
-
-      // 4. Hydrate Autostart and Minimize-to-tray status
-      try {
-        const isAuto = await invoke<boolean>("get_autostart_status");
-        setAutostartEnabled(Boolean(isAuto));
-      } catch {
-        // Ignored
+      if (queueRes.status === "fulfilled" && Array.isArray(queueRes.value)) {
+        setOfflineQueue(queueRes.value);
       }
 
-      try {
-        const isMin = await invoke<boolean>("get_minimize_to_tray_status");
-        setMinimizeToTray(Boolean(isMin));
-      } catch {
-        // Ignored
+      if (autoRes.status === "fulfilled") {
+        setAutostartEnabled(Boolean(autoRes.value));
+      }
+
+      if (minRes.status === "fulfilled") {
+        setMinimizeToTray(Boolean(minRes.value));
       }
 
       // 5. Listen for push HOI4 process status events
@@ -354,7 +341,7 @@ export function App() {
     initSystem();
 
     const queueInterval = setInterval(fetchOfflineQueue, 10000);
-    const processInterval = setInterval(fetchProcessStatus, 2500);
+    const processInterval = setInterval(fetchProcessStatus, 15000);
 
     return () => {
       clearInterval(queueInterval);
@@ -496,6 +483,46 @@ export function App() {
     } catch {
       setIsWatching(false);
       setAppStatus("Watcher Stopped", "idle");
+    }
+  }
+
+  // Save Events Actions
+  async function handleLoadMoreTelemetry() {
+    if (isLoadingMoreTelemetry || !hasMoreTelemetry) return;
+    setIsLoadingMoreTelemetry(true);
+    try {
+      const older = await invoke<TelemetryLog[]>("get_telemetry_history", {
+        limit: 15,
+        offset: telemetryLogs.length,
+      });
+      if (older && Array.isArray(older)) {
+        if (older.length < 15) {
+          setHasMoreTelemetry(false);
+        }
+        setTelemetryLogs((prev) => {
+          const existingKeys = new Set(prev.map((l) => `${l.file_hash}-${l.timestamp}`));
+          const filtered = older.filter((l) => !existingKeys.has(`${l.file_hash}-${l.timestamp}`));
+          return [...prev, ...filtered];
+        });
+      } else {
+        setHasMoreTelemetry(false);
+      }
+    } catch (err) {
+      console.warn("Could not load more telemetry:", err);
+    } finally {
+      setIsLoadingMoreTelemetry(false);
+    }
+  }
+
+  async function handleClearTelemetry() {
+    try {
+      await invoke("clear_telemetry_history_cmd");
+      setTelemetryLogs([]);
+      setHasMoreTelemetry(false);
+      setAppStatus("Save events history cleared", "idle");
+    } catch (err) {
+      console.error("Failed to clear telemetry history:", err);
+      setAppStatus("Failed to clear save events", "error");
     }
   }
 
@@ -673,6 +700,10 @@ export function App() {
 
           <ActivityTabs
             telemetryLogs={telemetryLogs}
+            hasMoreTelemetry={hasMoreTelemetry}
+            isLoadingMoreTelemetry={isLoadingMoreTelemetry}
+            onLoadMoreTelemetry={handleLoadMoreTelemetry}
+            onClearTelemetry={handleClearTelemetry}
             offlineQueue={offlineQueue}
             isRetryingQueue={isRetryingQueue}
             onRetryQueue={handleRetryOfflineQueue}

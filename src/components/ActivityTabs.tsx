@@ -40,6 +40,10 @@ export interface UpdateProgress {
 
 interface ActivityTabsProps {
   telemetryLogs: TelemetryLog[];
+  hasMoreTelemetry?: boolean;
+  isLoadingMoreTelemetry?: boolean;
+  onLoadMoreTelemetry?: () => void;
+  onClearTelemetry?: () => void;
   offlineQueue: QueuedUpload[];
   isRetryingQueue: boolean;
   onRetryQueue: () => void;
@@ -60,6 +64,10 @@ interface ActivityTabsProps {
 
 export function ActivityTabs({
   telemetryLogs,
+  hasMoreTelemetry = false,
+  isLoadingMoreTelemetry = false,
+  onLoadMoreTelemetry,
+  onClearTelemetry,
   offlineQueue,
   isRetryingQueue,
   onRetryQueue,
@@ -126,6 +134,27 @@ export function ActivityTabs({
         {/* Tab 1: Live Telemetry */}
         {activeTab === "telemetry" && (
           <div className="panel-content">
+            <div className="queue-controls-bar">
+              <span className="queue-status-text">
+                {telemetryLogs.length === 0
+                  ? "No save events recorded"
+                  : `${telemetryLogs.length} event${telemetryLogs.length === 1 ? "" : "s"} shown`}
+              </span>
+              {telemetryLogs.length > 0 && onClearTelemetry && (
+                <div className="queue-btn-group">
+                  <button
+                    type="button"
+                    onClick={onClearTelemetry}
+                    className="btn-danger-action btn-sm"
+                    title="Clear all recorded save events history from disk"
+                  >
+                    <TrashIcon size={12} />
+                    <span>Clear Events</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
             {telemetryLogs.length === 0 ? (
               <div className="empty-panel-state">
                 <ActivityIcon size={24} className="empty-icon text-muted" />
@@ -135,7 +164,16 @@ export function ActivityTabs({
                 </p>
               </div>
             ) : (
-              <div className="feed-list">
+              <div
+                className="feed-list"
+                onScroll={(e) => {
+                  if (!hasMoreTelemetry || isLoadingMoreTelemetry || !onLoadMoreTelemetry) return;
+                  const target = e.currentTarget;
+                  if (target.scrollHeight - target.scrollTop - target.clientHeight < 60) {
+                    onLoadMoreTelemetry();
+                  }
+                }}
+              >
                 {telemetryLogs.map((log, index) => {
                   const isRejected =
                     log.status.includes("REJECTED") ||
@@ -158,7 +196,7 @@ export function ActivityTabs({
                     : "Uploaded";
 
                   return (
-                    <div key={index} className="feed-card">
+                    <div key={`${log.file_hash}-${log.timestamp}-${index}`} className="feed-card">
                       <div className="feed-card-header">
                         <strong className="feed-file-name">{log.file_name}</strong>
                         <span className={`pill-status ${pillClass}`}>{pillLabel}</span>
@@ -175,6 +213,19 @@ export function ActivityTabs({
                     </div>
                   );
                 })}
+
+                {hasMoreTelemetry && (
+                  <div className="feed-load-more-container">
+                    <button
+                      type="button"
+                      onClick={onLoadMoreTelemetry}
+                      disabled={isLoadingMoreTelemetry}
+                      className="btn-secondary-action btn-sm btn-load-more"
+                    >
+                      {isLoadingMoreTelemetry ? "Loading older events..." : "Load Older Events"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

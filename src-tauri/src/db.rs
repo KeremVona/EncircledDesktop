@@ -243,12 +243,20 @@ pub fn record_telemetry_event(session_id: &str, payload: &TelemetryPayload) {
     });
 }
 
-pub fn get_recent_telemetry_history(limit: usize) -> Vec<TelemetryPayload> {
+pub fn clear_telemetry_history() -> Result<usize, String> {
+    with_db(|conn| {
+        conn.execute("DELETE FROM telemetry_history", [])
+            .map_err(|e| e.to_string())
+    })
+    .unwrap_or_else(|| Err("Could not access SQLite database".into()))
+}
+
+pub fn get_recent_telemetry_history(limit: usize, offset: usize) -> Vec<TelemetryPayload> {
     with_db(|conn| {
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT file_name, file_hash, status, verified, has_debug_flag, timestamp FROM telemetry_history ORDER BY id DESC LIMIT ?",
+            "SELECT file_name, file_hash, status, verified, has_debug_flag, timestamp FROM telemetry_history ORDER BY id DESC LIMIT ? OFFSET ?",
         ) {
-            let rows = stmt.query_map(params![limit as i64], |row| {
+            let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
                 let verified_int: i64 = row.get(3)?;
                 let debug_int: i64 = row.get(4)?;
                 Ok(TelemetryPayload {
@@ -321,5 +329,48 @@ mod tests {
         assert_eq!(content, b"test sqlite content");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_telemetry_history_pagination_and_clear() {
+        let _ = init_sqlite_db();
+        let _ = clear_telemetry_history();
+
+        let session = "test-session-pagination";
+        for i in 1..=10 {
+            record_telemetry_event(
+                session,
+                &TelemetryPayload {
+                    file_name: format!("save_{}.hoi4", i),
+                    file_hash: format!("hash_{}", i),
+                    status: "UPLOADED".to_string(),
+                    verified: true,
+                    has_debug_flag: false,
+                    timestamp: format!("170000000{}", i),
+                },
+            );
+        }
+
+        // Page 1: limit 4, offset 0
+        let page1 = get_recent_telemetry_history(4, 0);
+        assert_eq!(page1.len(), 4);
+        assert_eq!(page1[0].file_name, "save_10.hoi4"); // latest first
+
+        // Page 2: limit 4, offset 4
+        let page2 = get_recent_telemetry_history(4, 4);
+        assert_eq!(page2.len(), 4);
+        assert_eq!(page2[0].file_name, "save_6.hoi4");
+
+        // Page 3: limit 4, offset 8
+        let page3 = get_recent_telemetry_history(4, 8);
+        assert_eq!(page3.len(), 2);
+        assert_eq!(page3[0].file_name, "save_2.hoi4");
+
+        // Clear history
+        let cleared = clear_telemetry_history();
+        assert!(cleared.is_ok());
+
+        let empty = get_recent_telemetry_history(10, 0);
+        assert_eq!(empty.len(), 0);
     }
 }

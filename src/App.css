@@ -946,6 +946,19 @@ html, body {
   font-family: var(--font-mono);
 }
 
+.feed-load-more-container {
+  display: flex;
+  justify-content: center;
+  padding: 0.5rem 0 0.25rem;
+}
+
+.btn-load-more {
+  width: 100%;
+  justify-content: center;
+  font-size: 0.75rem;
+  padding: 0.4rem 0.75rem;
+}
+
 /* Queue Controls Bar */
 .queue-controls-bar {
   display: flex;

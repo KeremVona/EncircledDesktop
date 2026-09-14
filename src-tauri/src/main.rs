@@ -19,8 +19,8 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uploader::spawn_offline_retry_worker;
 use watcher::{
-    check_for_updates_cmd, clear_offline_queue, get_app_version, get_autostart_status,
-    get_default_save_path_cmd, get_minimize_to_tray_status, get_offline_queue,
+    check_for_updates_cmd, clear_offline_queue, clear_telemetry_history_cmd, get_app_version,
+    get_autostart_status, get_default_save_path_cmd, get_minimize_to_tray_status, get_offline_queue,
     get_process_status, get_telemetry_history, install_update_cmd, retry_offline_queue_now,
     select_save_folder, set_autostart, set_minimize_to_tray, start_watching, stop_watching,
     update_tray_tooltip,
@@ -186,6 +186,7 @@ fn main() {
             clear_offline_queue,
             retry_offline_queue_now,
             get_telemetry_history,
+            clear_telemetry_history_cmd,
             get_autostart_status,
             set_autostart,
             check_for_updates_cmd,

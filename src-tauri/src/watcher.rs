@@ -1,5 +1,5 @@
 use crate::models::{AppState, ProcessStatusPayload, TelemetryPayload};
-use crate::process::check_hoi4_process;
+use crate::process::get_cached_hoi4_process_status;
 use crate::uploader::process_and_upload;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
 use std::fs;
@@ -54,7 +54,7 @@ pub fn get_default_save_path() -> Result<PathBuf, String> {
 
 #[tauri::command]
 pub fn get_process_status() -> ProcessStatusPayload {
-    let (is_running, has_debug_flag) = check_hoi4_process();
+    let (is_running, has_debug_flag) = get_cached_hoi4_process_status();
     ProcessStatusPayload {
         is_running,
         has_debug_flag,
@@ -663,8 +663,15 @@ pub async fn retry_offline_queue_now(
 }
 
 #[tauri::command]
-pub fn get_telemetry_history() -> Vec<TelemetryPayload> {
-    crate::db::get_recent_telemetry_history(50)
+pub fn get_telemetry_history(limit: Option<usize>, offset: Option<usize>) -> Vec<TelemetryPayload> {
+    let limit = limit.unwrap_or(15).min(100);
+    let offset = offset.unwrap_or(0);
+    crate::db::get_recent_telemetry_history(limit, offset)
+}
+
+#[tauri::command]
+pub fn clear_telemetry_history_cmd() -> Result<usize, String> {
+    crate::db::clear_telemetry_history()
 }
 
 #[tauri::command]
